@@ -1,9 +1,11 @@
+```python
 # main.py
 # Run: streamlit run main.py
 #
 # RentinBerlin — One-file Streamlit website with:
-# - Beautiful Login / Signup / Reset (mobile-friendly)
-# - Background slideshow (assets/bg1.jpg bg2.jpg bg3.jpg) changes every 15 seconds
+# - “5-star” premium, responsive auth UI (phone + PC)
+# - Adjustable transparency + blur (user slider, optional)
+# - Background slideshow (assets/bg1.jpg bg2.jpg bg3.jpg) changes every 15 seconds (no rerun)
 # - Email+Password auth (SQLite, PBKDF2)
 # - Persistent login via URL token (?t=...)
 # - REAL Google OAuth (Authlib + st.secrets)
@@ -59,12 +61,17 @@ REGISTRATION_ENABLED = True
 AUTH_BG_FILES = ["bg1.jpg", "bg2.jpg", "bg3.jpg"]  # in assets/
 BG_ROTATE_SECONDS = 15
 
+# UI defaults
+DEFAULT_CARD_OPACITY = 0.92   # 0.60 - 0.98 recommended
+DEFAULT_CARD_BLUR = 14        # px
+DEFAULT_CARD_BORDER_OPACITY = 0.55
+DEFAULT_OVERLAY_DARKNESS = 0.35  # background overlay for readability
+
 
 # =============================
 # STREAMLIT PAGE CONFIG
 # =============================
 def _favicon():
-    # if you have assets/logo.png it will show as favicon
     p = os.path.join(ASSETS_DIR, "logo.png")
     if os.path.exists(p):
         return p
@@ -120,6 +127,14 @@ def is_valid_email(email: str) -> bool:
     return True
 
 
+def clamp(v: float, lo: float, hi: float) -> float:
+    try:
+        v = float(v)
+    except Exception:
+        return lo
+    return max(lo, min(hi, v))
+
+
 # =============================
 # PASSWORD HASHING (PBKDF2)
 # =============================
@@ -147,7 +162,6 @@ def verify_password(password: str, stored: str) -> bool:
             return False
         salt = base64.b64decode(salt_b64.encode("utf-8"))
         calc = _pbkdf2_hash_password(password, salt)
-        # constant-time compare
         return hmac.compare_digest(calc, hash_b64)
     except Exception:
         return False
@@ -157,12 +171,10 @@ def verify_password(password: str, stored: str) -> bool:
 # QUERY TOKEN (persistent session via URL)
 # =============================
 def get_query_token() -> str:
-    # new streamlit query_params API
     try:
         return (st.query_params.get("t") or "")
     except Exception:
         pass
-    # old API fallback
     try:
         qp = st.experimental_get_query_params()
         return (qp.get("t", [""])[0]) if qp else ""
@@ -183,7 +195,6 @@ def set_query_token(token: str):
 
 
 def clear_query_params():
-    # clear everything
     try:
         st.query_params.clear()
         return
@@ -353,7 +364,10 @@ def reset_password(email: str, new_password: str) -> Tuple[bool, str]:
 
     c = conn()
     cur = c.cursor()
-    cur.execute("UPDATE users SET password_hash=?, provider='local' WHERE email=?", (make_password_hash(new_password), email))
+    cur.execute(
+        "UPDATE users SET password_hash=?, provider='local' WHERE email=?",
+        (make_password_hash(new_password), email)
+    )
     changed = cur.rowcount
     c.commit()
     c.close()
@@ -420,7 +434,7 @@ def logout():
         delete_session(tok)
     clear_query_params()
     for k in list(st.session_state.keys()):
-        if k in ["user_id", "route", "session_token"]:
+        if k in ["user_id", "route", "session_token", "app_tab"]:
             st.session_state.pop(k, None)
 
 
@@ -440,7 +454,6 @@ def google_oauth_is_configured() -> bool:
 
 
 def _query_param_value(name: str) -> str:
-    # works for both new and old APIs
     try:
         v = st.query_params.get(name, "")
         if isinstance(v, list):
@@ -459,9 +472,7 @@ def _query_param_value(name: str) -> str:
 
 
 def google_oauth_handle_callback_if_present():
-    """
-    If URL contains ?code=... from Google OAuth, finish login.
-    """
+    """If URL contains ?code=... from Google OAuth, finish login."""
     if not google_oauth_is_configured():
         return
 
@@ -499,7 +510,6 @@ def google_oauth_handle_callback_if_present():
             uid = int(row["id"])
             c.close()
         else:
-            # create user with random password (can reset later)
             pw = uuid.uuid4().hex[:12] + "A!"
             cur = c.cursor()
             cur.execute(
@@ -511,10 +521,10 @@ def google_oauth_handle_callback_if_present():
             c.close()
             ensure_profile_for_user(uid, email)
 
-        # IMPORTANT: clear OAuth params (code, scope, etc.)
+        # Clear OAuth params (code, scope, etc.)
         clear_query_params()
 
-        # login session
+        # Login session
         token = create_session(uid)
         st.session_state["user_id"] = uid
         st.session_state["session_token"] = token
@@ -569,7 +579,7 @@ def inject_global_css():
             max-width: 1200px;
           }
 
-          /* button styling */
+          /* buttons */
           .stButton>button {
             border-radius: 14px !important;
             border: 1px solid rgba(226,232,240,1) !important;
@@ -603,16 +613,14 @@ def inject_global_css():
 # =============================
 # AUTH BACKGROUND SLIDESHOW (15s rotate, no rerun)
 # =============================
-def inject_auth_background_slideshow():
-    """
-    Creates a fixed fullscreen background slideshow using JS setInterval.
-    It uses your assets/bg1.jpg bg2.jpg bg3.jpg if present.
-    """
+def inject_auth_background_slideshow(overlay_darkness: float):
+    """Fullscreen background slideshow using JS setInterval (no rerun)."""
+    overlay_darkness = clamp(overlay_darkness, 0.10, 0.70)
+
     bgs = []
     for fn in AUTH_BG_FILES:
         p = asset_path(fn)
         if p:
-            # jpg/png accepted
             ext = os.path.splitext(fn)[1].lower().replace(".", "")
             if ext not in ["jpg", "jpeg", "png", "webp"]:
                 continue
@@ -620,12 +628,11 @@ def inject_auth_background_slideshow():
             mime = "image/jpeg" if ext in ["jpg", "jpeg"] else f"image/{ext}"
             bgs.append(f"data:{mime};base64,{b64}")
 
-    # If none exist, fallback to gradient
     if not bgs:
         st.markdown(
-            """
+            f"""
             <style>
-              .rb-bg {
+              .rb-bg {{
                 position: fixed;
                 inset: 0;
                 z-index: 0;
@@ -634,7 +641,13 @@ def inject_auth_background_slideshow():
                   radial-gradient(900px 700px at 90% 10%, rgba(99,102,241,0.14), transparent 55%),
                   radial-gradient(1000px 900px at 40% 90%, rgba(16,185,129,0.12), transparent 55%),
                   #f6f8fb;
-              }
+              }}
+              .rb-bg::after {{
+                content: "";
+                position: absolute;
+                inset: 0;
+                background: rgba(2,6,23,{overlay_darkness});
+              }}
             </style>
             <div class="rb-bg"></div>
             """,
@@ -642,8 +655,6 @@ def inject_auth_background_slideshow():
         )
         return
 
-    # Use slideshow div + overlay for readability
-    # No Streamlit rerun needed: pure JS changes background every 15 seconds
     js_array = "[" + ",".join([f"'{u}'" for u in bgs]) + "]"
     components.html(
         f"""
@@ -656,8 +667,8 @@ def inject_auth_background_slideshow():
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
-            transform: scale(1.02);
-            filter: saturate(1.05) contrast(1.02);
+            transform: scale(1.03);
+            filter: saturate(1.08) contrast(1.03);
             transition: background-image 0.6s ease-in-out;
           }}
           .rb-bg::after {{
@@ -665,7 +676,12 @@ def inject_auth_background_slideshow():
             position: absolute;
             inset: 0;
             background:
-              linear-gradient(180deg, rgba(2,6,23,0.35) 0%, rgba(2,6,23,0.25) 40%, rgba(2,6,23,0.45) 100%);
+              linear-gradient(
+                180deg,
+                rgba(2,6,23,{overlay_darkness + 0.06}) 0%,
+                rgba(2,6,23,{overlay_darkness}) 45%,
+                rgba(2,6,23,{overlay_darkness + 0.10}) 100%
+              );
           }}
         </style>
         <div class="rb-bg" id="rbBg"></div>
@@ -685,35 +701,44 @@ def inject_auth_background_slideshow():
 
 
 # =============================
-# AUTH UI CSS (professional centered card)
+# AUTH UI CSS (premium, responsive, adjustable transparency)
 # =============================
-def inject_auth_css():
+def inject_auth_css(card_opacity: float, card_blur_px: int, border_opacity: float):
+    card_opacity = clamp(card_opacity, 0.55, 0.98)
+    border_opacity = clamp(border_opacity, 0.10, 0.90)
+    card_blur_px = int(clamp(card_blur_px, 0, 24))
+
     st.markdown(
-        """
+        f"""
         <style>
-          /* auth shell centered */
-          .rb-auth-shell{
+          :root {{
+            --rb-card-opacity: {card_opacity};
+            --rb-border-opacity: {border_opacity};
+            --rb-blur: {card_blur_px}px;
+          }}
+
+          .rb-auth-shell {{
             position: relative;
             z-index: 3;
-            max-width: 440px;
+            width: 100%;
+            max-width: 460px;
             margin: 0 auto;
-            padding-top: 5vh;
-            padding-bottom: 6vh;
-          }
-          @media (max-width: 900px){
-            .rb-auth-shell{ max-width: 94vw; padding-top: 3vh; }
-          }
+            padding: 4.5vh 0 6vh 0;
+          }}
+          @media (max-width: 900px) {{
+            .rb-auth-shell {{ max-width: 94vw; padding-top: 3.2vh; }}
+          }}
 
-          .rb-auth-top{
+          .rb-auth-top {{
             display:flex;
             flex-direction:column;
             align-items:center;
             text-align:center;
             margin-bottom: 14px;
-          }
-          .rb-auth-logo{
-            width: 68px;
-            height: 68px;
+          }}
+          .rb-auth-logo {{
+            width: 70px;
+            height: 70px;
             border-radius: 18px;
             overflow:hidden;
             background: rgba(255,255,255,0.92);
@@ -723,46 +748,75 @@ def inject_auth_css():
             align-items:center;
             justify-content:center;
             backdrop-filter: blur(10px);
-          }
-          .rb-auth-logo img{ width:100%; height:100%; object-fit:cover; display:block; border:0 !important; }
+          }}
+          .rb-auth-logo img {{
+            width:100%;
+            height:100%;
+            object-fit:cover;
+            display:block;
+            border:0 !important;
+          }}
 
-          .rb-auth-appname{
+          .rb-auth-appname {{
             margin-top: 10px;
             font-weight: 950;
             font-size: 24px;
             letter-spacing: 0.2px;
-            color: rgba(255,255,255,0.95);
+            color: rgba(255,255,255,0.96);
             text-shadow: 0 12px 40px rgba(2,6,23,0.45);
-          }
-          .rb-auth-tagline{
+          }}
+          .rb-auth-tagline {{
             margin-top: 6px;
             font-size: 13px;
-            color: rgba(226,232,240,0.95);
+            color: rgba(226,232,240,0.96);
             text-shadow: 0 12px 40px rgba(2,6,23,0.35);
-          }
+          }}
 
-          .rb-auth-card{
-            background: rgba(255,255,255,0.92);
-            border: 1px solid rgba(255,255,255,0.55);
+          .rb-auth-card {{
+            background: rgba(255,255,255,var(--rb-card-opacity));
+            border: 1px solid rgba(255,255,255,var(--rb-border-opacity));
             border-radius: 24px;
-            box-shadow: 0 30px 90px rgba(2,6,23,0.35);
+            box-shadow:
+              0 30px 90px rgba(2,6,23,0.35),
+              0 10px 25px rgba(16,24,40,0.10);
             padding: 18px 18px 14px 18px;
-            backdrop-filter: blur(12px);
-          }
+            backdrop-filter: blur(var(--rb-blur));
+          }}
 
-          .rb-auth-h1{
+          .rb-auth-h1 {{
             font-weight: 950;
             font-size: 28px;
             margin: 0;
             color:#0f172a;
-          }
-          .rb-auth-sub{
+          }}
+          .rb-auth-sub {{
             margin-top: 6px;
             color:#64748b;
             font-size: 13px;
-          }
+          }}
 
-          .rb-divider{
+          .rb-stars {{
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            gap: 6px;
+            margin-top: 10px;
+            margin-bottom: 10px;
+            color: rgba(2,6,23,0.82);
+            font-weight: 950;
+          }}
+          .rb-stars .rb-star {{
+            font-size: 15px;
+            line-height: 1;
+            filter: drop-shadow(0 6px 16px rgba(2,6,23,0.18));
+          }}
+          .rb-stars .rb-rating {{
+            font-size: 12px;
+            color:#475569;
+            font-weight: 900;
+          }}
+
+          .rb-divider {{
             display:flex;
             align-items:center;
             gap:10px;
@@ -770,50 +824,52 @@ def inject_auth_css():
             color:#94a3b8;
             font-size: 12px;
             font-weight: 900;
-          }
+          }}
           .rb-divider:before,
-          .rb-divider:after{
+          .rb-divider:after {{
             content:"";
             height:1px;
             flex:1;
             background:#e5e7eb;
-          }
+          }}
 
-          .rb-foot{
+          .rb-foot {{
             margin-top: 10px;
             text-align:center;
             font-size: 12px;
             color:#64748b;
-          }
-          .rb-link{
+          }}
+          .rb-link {{
             color:#0f172a;
             font-weight: 950;
             text-decoration: none;
-          }
-          .rb-link:hover{ text-decoration: underline; }
+          }}
+          .rb-link:hover {{ text-decoration: underline; }}
 
-          .rb-forgot-wrap{
+          .rb-forgot-wrap {{
             display:flex;
-            justify-content:flex-end;
-            margin-top: -6px;
-            margin-bottom: 8px;
-          }
-          .rb-mini-link button{
-            padding: 0.15rem 0.45rem !important;
+            justify-content:space-between;
+            gap: 10px;
+            margin-top: 2px;
+          }}
+
+          .rb-mini-link button {{
+            padding: 0.20rem 0.55rem !important;
             border-radius: 10px !important;
             font-size: 12px !important;
             background: transparent !important;
             border: 1px solid transparent !important;
             color:#0f172a !important;
             box-shadow:none !important;
-          }
-          .rb-mini-link button:hover{
+            font-weight: 900 !important;
+          }}
+          .rb-mini-link button:hover {{
             background:#f8fafc !important;
             border-color:#e5e7eb !important;
-          }
+          }}
 
           /* social buttons (HTML) */
-          .rb-social-btn{
+          .rb-social-btn {{
             width: 100%;
             display:flex;
             align-items:center;
@@ -828,26 +884,35 @@ def inject_auth_css():
             text-decoration: none !important;
             box-shadow: 0 10px 25px rgba(16,24,40,0.06);
             transition: transform .08s ease, box-shadow .12s ease, border-color .12s ease;
-          }
-          .rb-social-btn:hover{
+          }}
+          .rb-social-btn:hover {{
             border-color: rgba(203,213,225,1);
             box-shadow: 0 14px 35px rgba(16,24,40,0.08);
             transform: translateY(-1px);
-          }
-          .rb-social-ico{
+          }}
+          .rb-social-ico {{
             width: 18px;
             height: 18px;
             display:inline-block;
-          }
-          .rb-apple{
+          }}
+          .rb-apple {{
             background: #0b1220;
             border-color: #0b1220;
             color: #ffffff;
-          }
-          .rb-apple:hover{
+          }}
+          .rb-apple:hover {{
             background: #0a0f1a;
             border-color: #0a0f1a;
-          }
+          }}
+
+          /* make auth form spacing feel premium on mobile */
+          @media (max-width: 520px) {{
+            .rb-auth-card {{
+              padding: 16px 14px 12px 14px;
+              border-radius: 22px;
+            }}
+            .rb-auth-h1 {{ font-size: 26px; }}
+          }}
         </style>
         """,
         unsafe_allow_html=True
@@ -855,8 +920,39 @@ def inject_auth_css():
 
 
 def auth_shell_open(tagline: str):
-    inject_auth_background_slideshow()
-    inject_auth_css()
+    # Adjustable UI controls (kept subtle)
+    # Toggle in query param: ?ui=1 to show controls, otherwise hidden for users.
+    show_ui = (_query_param_value("ui") == "1")
+
+    if show_ui:
+        with st.sidebar:
+            st.caption("Auth UI (preview controls)")
+            st.session_state["rb_card_opacity"] = st.slider(
+                "Card transparency", 0.55, 0.98,
+                float(st.session_state.get("rb_card_opacity", DEFAULT_CARD_OPACITY)),
+                0.01
+            )
+            st.session_state["rb_card_blur"] = st.slider(
+                "Card blur (px)", 0, 24,
+                int(st.session_state.get("rb_card_blur", DEFAULT_CARD_BLUR)),
+                1
+            )
+            st.session_state["rb_overlay_darkness"] = st.slider(
+                "Background overlay", 0.10, 0.70,
+                float(st.session_state.get("rb_overlay_darkness", DEFAULT_OVERLAY_DARKNESS)),
+                0.01
+            )
+    else:
+        st.session_state.setdefault("rb_card_opacity", DEFAULT_CARD_OPACITY)
+        st.session_state.setdefault("rb_card_blur", DEFAULT_CARD_BLUR)
+        st.session_state.setdefault("rb_overlay_darkness", DEFAULT_OVERLAY_DARKNESS)
+
+    inject_auth_background_slideshow(st.session_state["rb_overlay_darkness"])
+    inject_auth_css(
+        card_opacity=float(st.session_state["rb_card_opacity"]),
+        card_blur_px=int(st.session_state["rb_card_blur"]),
+        border_opacity=float(DEFAULT_CARD_BORDER_OPACITY)
+    )
 
     st.markdown("<div class='rb-auth-shell'>", unsafe_allow_html=True)
 
@@ -891,16 +987,11 @@ def auth_shell_close():
 
 
 def google_button_html() -> str:
-    """
-    Returns HTML for a nice Google button.
-    If assets/google_logo.png exists, uses it. Otherwise uses a simple 'G'.
-    """
     ico = asset_path("google_logo.png")
     if ico:
         b64 = read_file_b64(ico)
         icon_html = f"<img class='rb-social-ico' src='data:image/png;base64,{b64}' />"
     else:
-        # fallback: simple circle G
         icon_html = """
         <span class="rb-social-ico" style="
           width:18px;height:18px;border-radius:999px;
@@ -913,7 +1004,6 @@ def google_button_html() -> str:
 
 def render_google_oauth_button():
     if not google_oauth_is_configured():
-        # still show button, but info
         icon_html = google_button_html()
         st.markdown(
             f"""
@@ -943,7 +1033,6 @@ def render_google_oauth_button():
 
 
 def render_apple_button_ui():
-    # UI only (real Apple OAuth requires Apple Developer keys + JWT)
     st.markdown(
         """
         <a class="rb-social-btn rb-apple" href="#" onclick="return false;">
@@ -967,7 +1056,17 @@ def page_login():
     st.markdown("<div class='rb-auth-card'>", unsafe_allow_html=True)
     st.markdown("<div class='rb-auth-h1'>Sign in</div>", unsafe_allow_html=True)
     st.markdown("<div class='rb-auth-sub'>Use your email & password or continue with Google.</div>", unsafe_allow_html=True)
-    st.write("")
+
+    # 5-star rating strip (premium feel)
+    st.markdown(
+        """
+        <div class="rb-stars" aria-label="5 star rating">
+          <span class="rb-star">★</span><span class="rb-star">★</span><span class="rb-star">★</span><span class="rb-star">★</span><span class="rb-star">★</span>
+          <span class="rb-rating">Trusted by renters</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     # Handle OAuth callback if present
     google_oauth_handle_callback_if_present()
@@ -985,12 +1084,12 @@ def page_login():
         submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
 
     st.markdown("<div class='rb-forgot-wrap'>", unsafe_allow_html=True)
-    cols = st.columns([1, 1])
-    with cols[0]:
+    c1, c2 = st.columns(2)
+    with c1:
         if st.button("Create account", key="go_signup", use_container_width=True):
             st.session_state["route"] = "signup"
             st.rerun()
-    with cols[1]:
+    with c2:
         st.markdown("<div class='rb-mini-link'>", unsafe_allow_html=True)
         if st.button("Forgot password?", key="go_reset", use_container_width=True):
             st.session_state["route"] = "reset"
@@ -1011,7 +1110,7 @@ def page_login():
             st.rerun()
 
     st.markdown("<div class='rb-foot'>By continuing, you agree to basic community rules and privacy.</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)  # card
+    st.markdown("</div>", unsafe_allow_html=True)
     auth_shell_close()
 
 
@@ -1021,7 +1120,6 @@ def page_signup():
     st.markdown("<div class='rb-auth-card'>", unsafe_allow_html=True)
     st.markdown("<div class='rb-auth-h1'>Create account</div>", unsafe_allow_html=True)
     st.markdown("<div class='rb-auth-sub'>Fast signup — then sign in.</div>", unsafe_allow_html=True)
-    st.write("")
 
     if not REGISTRATION_ENABLED:
         st.warning("Registration is currently disabled.")
@@ -1044,7 +1142,6 @@ def page_signup():
         else:
             st.error(msg)
 
-    st.markdown("<div class='rb-foot'>Already have an account? <a class='rb-link' href='#'>Sign in</a></div>", unsafe_allow_html=True)
     if st.button("Back to Sign in", use_container_width=True):
         st.session_state["route"] = "login"
         st.rerun()
@@ -1059,7 +1156,6 @@ def page_reset():
     st.markdown("<div class='rb-auth-card'>", unsafe_allow_html=True)
     st.markdown("<div class='rb-auth-h1'>Reset password</div>", unsafe_allow_html=True)
     st.markdown("<div class='rb-auth-sub'>Set a new password for your email.</div>", unsafe_allow_html=True)
-    st.write("")
 
     with st.form("reset_form"):
         email = st.text_input("Email", placeholder="name@email.com")
@@ -1184,14 +1280,14 @@ def page_app():
 
     with col1:
         st.markdown("<div class='rb-card'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='rb-h1'>Welcome 👋</div>", unsafe_allow_html=True)
+        st.markdown("<div class='rb-h1'>Welcome 👋</div>", unsafe_allow_html=True)
         st.markdown("<div class='rb-muted'>Your session stays active even on refresh (URL token).</div>", unsafe_allow_html=True)
         st.write("")
         st.write("**Email:**", user.get("email", ""))
         st.write("**Username:**", user.get("username", ""))
         st.write("**Provider:**", user.get("provider", "local"))
         st.write("")
-        st.info("This is the base working website shell. Next you can add: posts, listings, chat, saved, etc.")
+        st.info("This is the base website shell. Next you can add: posts, listings, chat, saved, etc.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with col2:
@@ -1203,7 +1299,7 @@ def page_app():
             st.session_state["app_tab"] = "settings"
         st.write("")
         st.write("### Your Domain")
-        st.write("When your domain is active, you can point it to Streamlit or to a real hosting later.")
+        st.write("When your domain is active, you can point it to Streamlit or move to full hosting later.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.write("")
@@ -1225,7 +1321,6 @@ def page_app():
 # BOOT / ROUTER
 # =============================
 def boot_load_session():
-    # If already loaded in state, keep it
     if st.session_state.get("user_id"):
         return
 
@@ -1238,7 +1333,6 @@ def boot_load_session():
             st.session_state["route"] = "app"
             return
 
-    # default route
     if not st.session_state.get("route"):
         st.session_state["route"] = "login"
 
@@ -1248,7 +1342,6 @@ def main():
     inject_global_css()
     boot_load_session()
 
-    # If logged in -> app
     if st.session_state.get("user_id"):
         st.session_state["route"] = "app"
 
@@ -1269,3 +1362,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
