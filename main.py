@@ -1,20 +1,17 @@
 # main.py
 # Run: streamlit run main.py
 #
-# ONE-FILE Streamlit app (production-safe):
-# - Centered modern Login / Signup / Reset (mobile + desktop)
+# ONE-FILE Streamlit app (production-safe auth pages):
+# - Professional centered Login / Signup / Reset (mobile + desktop)
 # - Email+Password auth (SQLite)
 # - Persistent login via URL token (?t=...)
-# - REAL Google OAuth (Authlib) if secrets + requirements are set
-# - Apple button UI (real Apple OAuth requires Apple Developer keys)
+# - REAL Google OAuth (Authlib) if configured in st.secrets + requirements.txt
+# - Apple button UI (real Apple OAuth needs Apple Developer keys)
 #
-# Optional file:
+# Optional assets:
 #   assets/logo.png
-#
-# requirements.txt (repo root):
-#   streamlit
-#   authlib
-#   requests
+#   assets/google_logo.png
+#   assets/apple_logo.png
 
 import os
 import re
@@ -27,10 +24,10 @@ from typing import Optional, Dict, Any, Tuple
 
 import streamlit as st
 
-# Google OAuth (REAL)
+# --- Optional: REAL Google OAuth (Authlib) ---
 AUTHLIB_OK = False
 try:
-    from authlib.integrations.requests_client import OAuth2Session  # type: ignore
+    from authlib.integrations.requests_client import OAuth2Session
     AUTHLIB_OK = True
 except Exception:
     AUTHLIB_OK = False
@@ -42,18 +39,15 @@ except Exception:
 APP_NAME = "RentinBerlin"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "rentinberlin.db")
-
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 os.makedirs(ASSETS_DIR, exist_ok=True)
 
 SESSION_DAYS = 30
 REGISTRATION_ENABLED = True
 
-st.set_page_config(page_title=APP_NAME, page_icon="🏠", layout="wide")
-
 
 # =============================
-# HELPERS
+# BASIC HELPERS
 # =============================
 def now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
@@ -89,53 +83,43 @@ def _img_to_b64(path: str) -> str:
         return base64.b64encode(f.read()).decode("utf-8")
 
 
-def safe_get_secret(key: str, default: str = "") -> str:
-    try:
-        return str(st.secrets.get(key, default))
-    except Exception:
-        return default
-
-
 # =============================
-# QUERY PARAMS (TOKEN + OAUTH)
+# QUERY PARAMS
 # =============================
-def qp_get(name: str) -> str:
+def qp_get(key: str) -> str:
     try:
-        v = st.query_params.get(name, "")
+        v = st.query_params.get(key, "")
         return v if isinstance(v, str) else (v[0] if v else "")
     except Exception:
-        pass
-    try:
-        qp = st.experimental_get_query_params()
-        v2 = qp.get(name, [""])
-        return v2[0] if v2 else ""
-    except Exception:
-        return ""
+        try:
+            q = st.experimental_get_query_params() or {}
+            v = q.get(key, [""])
+            return v[0] if isinstance(v, list) and v else ""
+        except Exception:
+            return ""
 
 
 def qp_set(**kwargs):
     try:
         for k, v in kwargs.items():
-            st.query_params[k] = v
+            st.query_params[k] = str(v)
         return
     except Exception:
-        pass
-    try:
-        st.experimental_set_query_params(**kwargs)
-    except Exception:
-        pass
+        try:
+            st.experimental_set_query_params(**{k: str(v) for k, v in kwargs.items()})
+        except Exception:
+            pass
 
 
-def qp_clear_all():
+def qp_clear():
     try:
         st.query_params.clear()
         return
     except Exception:
-        pass
-    try:
-        st.experimental_set_query_params()
-    except Exception:
-        pass
+        try:
+            st.experimental_set_query_params()
+        except Exception:
+            pass
 
 
 # =============================
@@ -203,6 +187,7 @@ def ensure_profile_for_user(user_id: int, email: str):
 
     c = conn()
     cur = c.cursor()
+
     row = cur.execute("SELECT user_id FROM profiles WHERE user_id=?", (user_id,)).fetchone()
     if row:
         c.close()
@@ -210,11 +195,11 @@ def ensure_profile_for_user(user_id: int, email: str):
 
     suffix = 0
     while True:
-        candidate = base_username if suffix == 0 else f"{base_username}{suffix}"
+        try_u = base_username if suffix == 0 else f"{base_username}{suffix}"
         try:
             cur.execute(
                 "INSERT INTO profiles (user_id, username, display_name, updated_at) VALUES (?,?,?,?)",
-                (user_id, candidate, "", now_iso()),
+                (user_id, try_u, "", now_iso()),
             )
             c.commit()
             c.close()
@@ -229,46 +214,34 @@ def ensure_profile_for_user(user_id: int, email: str):
 # =============================
 # AUTH: EMAIL/PASSWORD
 # =============================
-def create_user(email: str, phone: str, password: str, username: str) -> Tuple[bool, str]:
+def create_user(email: str, phone: str, password: str) -> Tuple[bool, str]:
     email = normalize_email(email)
     phone = normalize_phone(phone)
     password = (password or "").strip()
-    username = sanitize_username(username)
 
     if not email or "@" not in email:
         return False, "Enter a valid email."
     if len(password) < 6:
         return False, "Password must be at least 6 characters."
-    if not username:
-        return False, "Username is required."
-    if re.match(r"^\d", username):
-        return False, "Username can not begin with numbers."
+    if re.match(r"^\d", sanitize_username(email.split("@")[0]) or ""):
+        # suggestion only; not blocking by default
+        pass
 
     c = conn()
     cur = c.cursor()
-
     try:
         cur.execute(
             "INSERT INTO users (created_at, email, phone, password_hash) VALUES (?,?,?,?)",
             (now_iso(), email, phone, sha256(password)),
         )
-        user_id = int(cur.lastrowid)
-        # Insert profile with chosen username
-        cur.execute(
-            "INSERT INTO profiles (user_id, username, display_name, updated_at) VALUES (?,?,?,?)",
-            (user_id, username, "", now_iso()),
-        )
         c.commit()
+        user_id = int(cur.lastrowid)
         c.close()
+        ensure_profile_for_user(user_id, email)
         return True, "Account created. You can sign in now."
-    except sqlite3.IntegrityError as e:
+    except sqlite3.IntegrityError:
         c.close()
-        msg = str(e).lower()
-        if "users.email" in msg or "email" in msg:
-            return False, "Email already exists."
-        if "profiles.username" in msg or "username" in msg:
-            return False, "Username already taken."
-        return False, "Account could not be created."
+        return False, "Email already exists."
 
 
 def authenticate(email: str, password: str) -> Optional[int]:
@@ -280,7 +253,6 @@ def authenticate(email: str, password: str) -> Optional[int]:
     c = conn()
     row = c.execute("SELECT id, email, password_hash FROM users WHERE email=?", (email,)).fetchone()
     c.close()
-
     if not row:
         return None
     if row["password_hash"] != sha256(password):
@@ -306,7 +278,6 @@ def reset_password(email: str, new_password: str) -> Tuple[bool, str]:
     changed = cur.rowcount
     c.commit()
     c.close()
-
     return (True, "Password reset. Please sign in.") if changed else (False, "Email not found.")
 
 
@@ -382,7 +353,372 @@ def delete_session(token: str):
     c.close()
 
 
+def do_login(uid: int):
+    token = create_session(uid)
+    st.session_state["user_id"] = uid
+    st.session_state["session_token"] = token
+    qp_clear()
+    qp_set(t=token)
+    st.session_state["route"] = "app"
+    st.rerun()
+
+
 def logout():
+    tok = st.session_state.get("session_token") or qp_get("t")
+    if tok:
+        delete_session(tok)
+    qp_clear()
+    for k in list(st.session_state.keys()):
+        if k in ["user_id", "route", "session_token", "google_oauth_state"]:
+            st.session_state.pop(k, None)
+
+
+# =============================
+# GOOGLE OAUTH (REAL)
+# =============================
+def google_oauth_is_configured() -> bool:
+    if not AUTHLIB_OK:
+        return False
+    try:
+        _ = st.secrets["GOOGLE_CLIENT_ID"]
+        _ = st.secrets["GOOGLE_CLIENT_SECRET"]
+        _ = st.secrets["GOOGLE_REDIRECT_URI"]
+        return True
+    except Exception:
+        return False
+
+
+def google_oauth_client() -> OAuth2Session:
+    return OAuth2Session(
+        client_id=st.secrets["GOOGLE_CLIENT_ID"],
+        scope="openid email profile",
+        redirect_uri=st.secrets["GOOGLE_REDIRECT_URI"],
+    )
+
+
+def google_auth_url() -> str:
+    oauth = google_oauth_client()
+    url, state = oauth.create_authorization_url(
+        "https://accounts.google.com/o/oauth2/v2/auth",
+        access_type="offline",
+        prompt="select_account",
+    )
+    st.session_state["google_oauth_state"] = state
+    return url
+
+
+def google_callback_try_login():
+    # Called on every run. If user returned from Google with code, we finish login.
+    if not google_oauth_is_configured():
+        return
+
+    code = qp_get("code")
+    state = qp_get("state")
+    if not code:
+        return
+
+    expected = st.session_state.get("google_oauth_state", "")
+    if expected and state and state != expected:
+        st.error("Google login failed: invalid state.")
+        qp_clear()
+        return
+
+    oauth = google_oauth_client()
+    try:
+        oauth.fetch_token(
+            "https://oauth2.googleapis.com/token",
+            code=code,
+            client_secret=st.secrets["GOOGLE_CLIENT_SECRET"],
+        )
+        userinfo = oauth.get("https://openidconnect.googleapis.com/v1/userinfo").json()
+        email = normalize_email(userinfo.get("email", ""))
+
+        if not email:
+            st.error("Google login failed: Google did not return an email.")
+            qp_clear()
+            return
+
+        # Get or create local user
+        c = conn()
+        row = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if row:
+            uid = int(row["id"])
+            c.close()
+        else:
+            # Create with random password (user can reset later)
+            pw = uuid.uuid4().hex[:12] + "A!"
+            cur = c.cursor()
+            cur.execute(
+                "INSERT INTO users (created_at, email, phone, password_hash) VALUES (?,?,?,?)",
+                (now_iso(), email, "", sha256(pw)),
+            )
+            c.commit()
+            uid = int(cur.lastrowid)
+            c.close()
+            ensure_profile_for_user(uid, email)
+
+        do_login(uid)
+    except Exception as e:
+        st.error(f"Google login failed: {e}")
+        qp_clear()
+
+
+# =============================
+# UI STYLE
+# =============================
+def inject_style():
+    st.markdown(
+        """
+        <style>
+          .stApp {
+            background:
+              radial-gradient(1200px 800px at 10% 0%, rgba(255,122,26,0.10), transparent 55%),
+              radial-gradient(900px 700px at 90% 10%, rgba(99,102,241,0.10), transparent 50%),
+              #f6f8fb !important;
+          }
+
+          #MainMenu {visibility: hidden;}
+          footer {visibility: hidden;}
+          header {visibility: hidden;}
+
+          section.main > div.block-container {
+            padding-top: 0.8rem;
+            padding-bottom: 3.8rem;
+            max-width: 1280px;
+          }
+
+          @media (max-width: 768px) {
+            section.main > div.block-container { padding-left: 0.75rem; padding-right: 0.75rem; }
+            .stButton>button { padding: 0.52rem 0.75rem !important; font-size: 12px !important; }
+          }
+
+          /* global buttons */
+          .stButton>button {
+            border-radius: 14px !important;
+            border: 1px solid rgba(226,232,240,1) !important;
+            background: #ffffff !important;
+            color: #0f172a !important;
+            padding: 0.62rem 0.95rem !important;
+            font-weight: 900 !important;
+          }
+          .stButton>button:hover {
+            border-color: rgba(203,213,225,1) !important;
+            background: #fbfdff !important;
+          }
+          .stButton>button[kind="primary"] {
+            background: #ff7a1a !important;
+            border-color: #ff7a1a !important;
+            color: white !important;
+            box-shadow: 0 10px 30px rgba(255, 122, 26, 0.20) !important;
+          }
+
+          /* inputs */
+          .stTextInput input {
+            border-radius: 14px !important;
+            height: 46px !important;
+          }
+
+          /* AUTH LAYOUT */
+          .rb-auth-shell{
+            max-width: 440px;
+            margin: 0 auto;
+            padding-top: 5.5vh;
+            padding-bottom: 6vh;
+          }
+          @media (max-width: 900px){
+            .rb-auth-shell{ max-width: 94vw; padding-top: 3vh; }
+          }
+
+          .rb-auth-top{
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            text-align:center;
+            margin-bottom: 14px;
+          }
+
+          .rb-auth-logo{
+            width: 68px;
+            height: 68px;
+            border-radius: 18px;
+            overflow:hidden;
+            background: #ffffff;
+            border: 1px solid #eef2f7;
+            box-shadow: 0 18px 45px rgba(16, 24, 40, 0.10);
+            display:flex;
+            align-items:center;
+            justify-content:center;
+          }
+          .rb-auth-logo img{
+            width:100%;
+            height:100%;
+            object-fit:cover;
+            display:block;
+            border:0 !important;
+            outline:0 !important;
+          }
+
+          .rb-auth-appname{
+            margin-top: 10px;
+            font-weight: 950;
+            font-size: 22px;
+            letter-spacing: 0.2px;
+            color:#0f172a;
+          }
+          .rb-auth-tagline{
+            margin-top: 6px;
+            font-size: 13px;
+            color:#64748b;
+          }
+
+          .rb-auth-card{
+            background: rgba(255,255,255,0.92);
+            border: 1px solid #eef2f7;
+            border-radius: 22px;
+            box-shadow: 0 26px 70px rgba(16,24,40,0.10);
+            padding: 18px 18px 14px 18px;
+            backdrop-filter: blur(8px);
+          }
+          .rb-auth-h1{
+            font-weight: 950;
+            font-size: 28px;
+            margin: 0;
+            color:#0f172a;
+            text-align:left;
+          }
+          .rb-auth-sub{
+            margin-top: 6px;
+            color:#64748b;
+            font-size: 13px;
+            text-align:left;
+          }
+
+          .rb-auth-divider{
+            display:flex;
+            align-items:center;
+            gap:10px;
+            margin: 14px 0;
+            color:#94a3b8;
+            font-size: 12px;
+            font-weight: 900;
+          }
+          .rb-auth-divider:before,
+          .rb-auth-divider:after{
+            content:"";
+            height:1px;
+            flex:1;
+            background:#e5e7eb;
+          }
+
+          .rb-auth-foot{
+            margin-top: 10px;
+            text-align:center;
+            font-size: 12px;
+            color:#64748b;
+          }
+          .rb-link{
+            color:#0f172a;
+            font-weight: 950;
+            text-decoration: none;
+          }
+          .rb-link:hover{ text-decoration: underline; }
+
+          .rb-forgot-wrap{
+            display:flex;
+            justify-content:flex-end;
+            margin-top: -6px;
+            margin-bottom: 10px;
+          }
+          .rb-forgot-wrap button{
+            padding: 0.2rem 0.45rem !important;
+            border-radius: 10px !important;
+            font-size: 12px !important;
+            background: transparent !important;
+            border: 1px solid transparent !important;
+            color:#0f172a !important;
+            box-shadow:none !important;
+          }
+          .rb-forgot-wrap button:hover{
+            background:#f8fafc !important;
+            border-color:#e5e7eb !important;
+          }
+
+          /* HTML OAuth buttons */
+          .rb-oauth-btn{
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            gap:12px;
+            padding:12px;
+            border-radius:14px;
+            border:1px solid #e5e7eb;
+            background:white;
+            font-weight:900;
+            color:#0f172a;
+            cursor:pointer;
+            box-shadow:0 8px 24px rgba(0,0,0,0.06);
+            user-select:none;
+          }
+          .rb-oauth-btn:hover{
+            background:#fbfdff;
+            border-color:#dbe3ee;
+          }
+          .rb-oauth-icon{
+            width:20px;
+            height:20px;
+            display:block;
+          }
+          .rb-oauth-a{
+            text-decoration:none !important;
+          }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# =============================
+# UI COMPONENTS
+# =============================
+def auth_shell_open(tagline: str):
+    st.markdown("<div class='rb-auth-shell'>", unsafe_allow_html=True)
+
+    logo = asset_path("logo.png")
+    if logo and os.path.exists(logo):
+        b64 = _img_to_b64(logo)
+        st.markdown(
+            f"""
+            <div class="rb-auth-top">
+              <div class="rb-auth-logo"><img src="data:image/png;base64,{b64}" /></div>
+              <div class="rb-auth-appname">{APP_NAME}</div>
+              <div class="rb-auth-tagline">{tagline}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""
+            <div class="rb-auth-top">
+              <div class="rb-auth-logo">🏠</div>
+              <div class="rb-auth-appname">{APP_NAME}</div>
+              <div class="rb-auth-tagline">{tagline}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def auth_shell_close():
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def oauth_html_button(label: str, href: str, icon_asset_name: str):
+    icon_path = asset_path(icon_asset_name)
+    icon_html = ""
+    if icon_path and os.path.exists(icon_path):
+        b64 = _img_to_b64(icon_path)
+        icon_html = f"<img class='rb-oauth-icon'ogout():
     tok = st.session_state.get("session_token") or qp_get("t")
     if tok:
         delete_session(tok)
