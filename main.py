@@ -1,879 +1,41 @@
-# === DROP-IN REPLACEMENT (AUTH + ROUTE + MOBILE FIX) ===
-# Paste these functions into your existing big file (keep your other pages/features as-is).
-# Replace ONLY:
-# inject_style()
-# page_login()
-# page_register()
-# page_reset()
-# main() routing section (the part that decides which page to show)
-# Everything else in your big code stays.
+
+# main.py
+# Run: streamlit run main.py
+#
+# RentinBerlin — ONE-FILE Streamlit app (Berlin timezone + modern UI + SQLite)
+#
+# Fixes/Upgrades included:
+# ✅ Persistent login via URL token (?t=...) so refresh/back doesn't log out
+# ✅ Germany time only (Europe/Berlin) everywhere
+# ✅ Building number OPTIONAL everywhere (DB + forms + address)
+# ✅ Professional included-features pills (one color style)
+# ✅ Media viewer: images/videos slider (Prev/Next + optional autoplay if autorefresh exists)
+# ✅ Messages/Requests work + "other_id" SQL bug fixed
+# ✅ Profile shows Posts + Followers + Following + Saved (liked posts)
+# ✅ Support page includes rating + comment submission + contact + suggestions
+# ✅ Report flag available in Profile, Messages, Requests, PostDetails
+# ✅ Logo in tab + navbar bigger (assets/logo.png)
+# ✅ FIX: Duplicate widget keys for cards across tabs/pages by namespacing with ctx
+#
+# Optional assets:
+#   assets/logo.png
+#   assets/avatar_unknown.png
+#   assets/avatar_male.png
+#   assets/avatar_female.png
+#
+# Storage:
+#   uploads/ (user uploads)
+#   berlinrent_social.db (SQLite)
 
 import os
+import random
 import re
-import uuid
 import time
+import uuid
 import sqlite3
 import hashlib
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple
-from urllib.parse import quote_plus, urlencode
-
-import streamlit as st
-import streamlit.components.v1 as components
-
-# -----------------------------
-# QUERY PARAMS HELPERS (website-like routing)
-# -----------------------------
-def qp_get(key: str, default: str = "") -> str:
-    try:
-        v = st.query_params.get(key)
-        if isinstance(v, list):
-            return v[0] if v else default
-        return v if v is not None else default
-    except Exception:
-        try:
-            qp = st.experimental_get_query_params()
-            return (qp.get(key, [default])[0]) if qp else default
-        except Exception:
-            return default
-
-
-def qp_set(**kwargs):
-    clean = {k: v for k, v in kwargs.items() if v is not None and str(v) != ""}
-    try:
-        st.query_params.clear()
-        for k, v in clean.items():
-            st.query_params[k] = v
-    except Exception:
-        try:
-            st.experimental_set_query_params(**clean)
-        except Exception:
-            pass
-
-
-def build_url(**kwargs) -> str:
-    clean = {k: v for k, v in kwargs.items() if v is not None and str(v) != ""}
-    qs = urlencode(clean, doseq=False)
-    return f"?{qs}" if qs else ""
-
-
-def nav_to(route: str, page: str = "", token: str = ""):
-    t = token or st.session_state.get("session_token", "") or qp_get("t", "")
-    if route in ["login", "register", "reset"]:
-        qp_set(t=t, r=route)
-        st.session_state["route"] = route
-        st.session_state["page"] = ""
-    else:
-        qp_set(t=t, r="app", p=page or "Feed")
-        st.session_state["route"] = "app"
-        st.session_state["page"] = page or "Feed"
-    st.rerun()
-
-
-# -----------------------------
-# STYLE (KEEP EVERYTHING + ADD AUTH + MOBILE FIX)
-# -----------------------------
-def inject_style():
-    st.markdown(
-        """
-        <style>
-          .stApp { background: #f6f8fb; }
-          section.main > div.block-container { padding-top: 0.7rem; padding-bottom: 4.5rem; max-width: 1280px; }
-
-          #MainMenu {visibility: hidden;}
-          footer {visibility: hidden;}
-          header {visibility: hidden;}
-
-          @media (max-width: 768px) {
-            section.main > div.block-container { padding-left: 0.75rem; padding-right: 0.75rem; }
-            .rb-title { font-size: 34px !important; }
-            .rb-subtitle { font-size: 14px !important; }
-            .rb-navwrap { padding: 8px 10px !important; }
-            .stButton>button { padding: 0.5rem 0.7rem !important; font-size: 12px !important; }
-          }
-
-          .stButton>button {
-            border-radius: 14px !important;
-            border: 1px solid rgba(226,232,240,1) !important;
-            background: #ffffff !important;
-            color: #0f172a !important;
-            padding: 0.55rem 0.9rem !important;
-            font-weight: 900 !important;
-          }
-          .stButton>button:hover {
-            border-color: rgba(203,213,225,1) !important;
-            background: #fbfdff !important;
-          }
-          .stButton>button[kind="primary"] {
-            background: #ff7a1a !important;
-            border-color: #ff7a1a !important;
-            color: white !important;
-            box-shadow: 0 10px 30px rgba(255, 122, 26, 0.20) !important;
-          }
-
-          .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] {
-            border-radius: 14px !important;
-          }
-
-          .rb-card {
-            background: #ffffff;
-            border: 1px solid #eef2f7;
-            border-radius: 18px;
-            box-shadow: 0 18px 45px rgba(16, 24, 40, 0.06);
-            padding: 14px;
-          }
-          .rb-card-tight {
-            background: #ffffff;
-            border: 1px solid #eef2f7;
-            border-radius: 18px;
-            box-shadow: 0 18px 45px rgba(16, 24, 40, 0.06);
-            padding: 0;
-            overflow: hidden;
-          }
-
-          .rb-muted { color: #6b7280; font-size: 12px; }
-          .rb-title { font-weight: 950; font-size: 46px; line-height: 1.03; margin: 0; color:#0f172a;}
-          .rb-subtitle { font-size: 16px; color:#6b7280; margin-top: 10px; }
-
-          .rb-chip{
-            display:inline-flex;
-            align-items:center;
-            font-size:12px;
-            padding:6px 10px;
-            border-radius:999px;
-            margin-right:8px;
-            margin-bottom:8px;
-            font-weight:900;
-            border:1px solid #e5e7eb;
-            background:#f8fafc;
-            color:#0f172a;
-            white-space:nowrap;
-          }
-          .rb-chip-dark{ background:#0f172a; border-color:#0f172a; color:white; }
-
-          .rb-section-title { font-size: 26px; font-weight: 950; margin-top: 8px; color:#0f172a; }
-
-          .rb-navwrap {
-            background: #ffffff;
-            border: 1px solid #eef2f7;
-            border-radius: 18px;
-            box-shadow: 0 18px 45px rgba(16, 24, 40, 0.06);
-            padding: 10px 14px;
-          }
-          .rb-logo { display:flex; align-items:center; gap:10px; font-weight:950; font-size:18px; color:#0f172a; }
-
-          .rb-bubble-me {
-            background: #ffedd5;
-            border: 1px solid #fed7aa;
-            padding: 10px 12px;
-            border-radius: 16px;
-            font-weight: 900;
-            color: #0f172a;
-          }
-          .rb-bubble-them {
-            background: #f1f5f9;
-            border: 1px solid #e2e8f0;
-            padding: 10px 12px;
-            border-radius: 16px;
-            font-weight: 900;
-            color: #0f172a;
-          }
-
-          .rb-fab {
-            position: fixed;
-            right: 18px;
-            bottom: 18px;
-            z-index: 9999;
-          }
-          .rb-fab button {
-            border-radius: 999px !important;
-            padding: 14px 16px !important;
-            font-weight: 950 !important;
-            box-shadow: 0 18px 45px rgba(16, 24, 40, 0.18) !important;
-          }
-
-          /* =============================
-             AUTH (LOGIN / REGISTER / RESET) — MOBILE FIRST + CENTER
-             ============================= */
-
-          .rb-auth-bg{
-            position: fixed;
-            inset: 0;
-            z-index: 0;
-            pointer-events:none;
-            background:
-              radial-gradient(900px 520px at 15% 20%, rgba(0, 229, 255, 0.16), transparent 60%),
-              radial-gradient(800px 480px at 85% 18%, rgba(255, 122, 26, 0.18), transparent 62%),
-              radial-gradient(900px 720px at 55% 90%, rgba(168, 85, 247, 0.16), transparent 64%),
-              linear-gradient(135deg, #05060b 0%, #070a14 45%, #04040a 100%);
-          }
-          section.main { position: relative; z-index: 2; }
-
-          .rb-auth-shell{
-            max-width: 460px;
-            margin: 0 auto;
-            padding-top: 6vh;
-            padding-bottom: 6vh;
-          }
-          @media (max-width: 520px){
-            .rb-auth-shell{ max-width: 100%; padding-top: 3vh; padding-bottom: 3vh; }
-          }
-
-          .rb-auth-card{
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.14);
-            border-radius: 22px;
-            backdrop-filter: blur(14px);
-            -webkit-backdrop-filter: blur(14px);
-            box-shadow: 0 30px 90px rgba(0,0,0,0.40);
-            padding: 18px 16px 14px 16px;
-          }
-
-          .rb-auth-top{
-            display:flex;
-            flex-direction:column;
-            align-items:center;
-            text-align:center;
-            gap:10px;
-            margin-bottom: 10px;
-          }
-          .rb-auth-logoimg{
-            width:72px;
-            height:72px;
-            object-fit:contain;
-            border-radius:18px;
-            background: rgba(255,255,255,0.08);
-            border: 1px solid rgba(255,255,255,0.12);
-          }
-          .rb-auth-title{
-            font-weight: 950;
-            font-size: 32px;
-            color: rgba(255,255,255,0.95);
-            margin: 0;
-            letter-spacing: 0.3px;
-          }
-          .rb-auth-sub{
-            color: rgba(255,255,255,0.75);
-            font-size: 14px;
-            margin-top: 2px;
-          }
-
-          .rb-auth-card .stTextInput input{
-            height: 46px !important;
-            border-radius: 14px !important;
-            border: 1px solid rgba(255,255,255,0.16) !important;
-            background: rgba(255,255,255,0.08) !important;
-            color: rgba(255,255,255,0.92) !important;
-          }
-          .rb-auth-card .stTextInput input::placeholder{
-            color: rgba(255,255,255,0.45) !important;
-          }
-          .rb-auth-card label{
-            color: rgba(255,255,255,0.86) !important;
-            font-weight: 900 !important;
-          }
-
-          .rb-auth-links{
-            display:flex;
-            align-items:center;
-            justify-content:space-between;
-            gap:12px;
-            margin-top: 8px;
-            flex-wrap: wrap;
-          }
-          .rb-auth-links a{
-            color: rgba(255,255,255,0.86);
-            font-weight: 900;
-            text-decoration: none !important;
-            font-size: 13px;
-            border-bottom: 1px dashed rgba(255,255,255,0.18);
-            padding-bottom: 2px;
-          }
-          .rb-auth-links a:hover{
-            color: white;
-            border-bottom-color: rgba(255,255,255,0.35);
-          }
-
-          .rb-auth-divider{
-            margin: 12px 0;
-            display:flex;
-            align-items:center;
-            gap:10px;
-          }
-          .rb-auth-divider:before,
-          .rb-auth-divider:after{
-            content:"";
-            height:1px;
-            flex:1;
-            background: rgba(255,255,255,0.14);
-          }
-          .rb-auth-divider span{
-            font-size: 12px;
-            color: rgba(255,255,255,0.65);
-            font-weight: 900;
-          }
-
-          .rb-auth-note{
-            font-size: 12px;
-            color: rgba(255,255,255,0.70);
-            line-height: 1.35;
-          }
-
-          img { outline:none !important; border:none !important; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# -----------------------------
-# AUTH UI HELPERS
-# -----------------------------
-def _auth_shell_start():
-    st.markdown("<div class='rb-auth-bg'></div>", unsafe_allow_html=True)
-    st.markdown("<div class='rb-auth-shell'>", unsafe_allow_html=True)
-    st.markdown("<div class='rb-auth-card'>", unsafe_allow_html=True)
-
-
-def _auth_shell_end():
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
-
-def _render_auth_logo():
-    logo = asset_path("logo.png")
-    if logo and os.path.exists(logo):
-        st.image(logo, width=72)
-    else:
-        st.markdown(
-            "<div class='rb-auth-logoimg' style='display:flex;align-items:center;justify-content:center;font-size:34px;'>🏠</div>",
-            unsafe_allow_html=True,
-        )
-
-
-def _auth_oauth_buttons_placeholder():
-    col1, col2 = st.columns(2)
-    with col1:
-        st.button("Continue with Google", use_container_width=True, disabled=True)
-    with col2:
-        st.button("Continue with Apple", use_container_width=True, disabled=True)
-
-
-# -----------------------------
-# AUTH PAGES (WORKING EMAIL/PASSWORD NOW)
-# -----------------------------
-def page_login():
-    _auth_shell_start()
-
-    st.markdown("<div class='rb-auth-top'>", unsafe_allow_html=True)
-    _render_auth_logo()
-    st.markdown("<h1 class='rb-auth-title'>Sign in</h1>", unsafe_allow_html=True)
-    st.markdown("<div class='rb-auth-sub'>Logo top center • clean • mobile-ready</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    with st.form("login_form_main", clear_on_submit=False):
-        email_or_phone = st.text_input("Email or Phone", placeholder="name@email.com or +49...")
-        password = st.text_input("Password", type="password", placeholder="Min 6 characters")
-        go = st.form_submit_button("Login", type="primary", use_container_width=True)
-
-    st.markdown("<div class='rb-auth-links'>", unsafe_allow_html=True)
-    st.markdown(f"<a href='{build_url(r='reset', t=qp_get('t',''))}'>Forgot password?</a>", unsafe_allow_html=True)
-    st.markdown(f"<a href='{build_url(r='register', t=qp_get('t',''))}'>New to RentinBerlin? Create account</a>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='rb-auth-divider'><span>OR</span></div>", unsafe_allow_html=True)
-    _auth_oauth_buttons_placeholder()
-
-    st.markdown(
-        "<div class='rb-auth-note'>Password must be at least 6 characters.</div>",
-        unsafe_allow_html=True,
-    )
-
-    if go:
-        e = normalize_email(email_or_phone)
-        p = normalize_phone(email_or_phone)
-        uid = None
-        if "@" in e:
-            uid = authenticate(e, password)
-        else:
-            # phone login (optional): map phone->email user if you want; for now keep email login only
-            uid = None
-
-        if not uid:
-            st.error("Wrong email or password.")
-        else:
-            token = create_session(uid)
-            st.session_state["user_id"] = uid
-            st.session_state["session_token"] = token
-            nav_to("app", page="Feed", token=token)
-
-    _auth_shell_end()
-
-
-def page_register():
-    _auth_shell_start()
-
-    st.markdown("<div class='rb-auth-top'>", unsafe_allow_html=True)
-    _render_auth_logo()
-    st.markdown("<h1 class='rb-auth-title'>Create account</h1>", unsafe_allow_html=True)
-    st.markdown("<div class='rb-auth-sub'>Classic, centered, professional</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    with st.form("register_form_main", clear_on_submit=False):
-        email = st.text_input("Email", placeholder="name@email.com")
-        phone = st.text_input("Phone (optional)", placeholder="+49 ...")
-        username = st.text_input("Username", placeholder="example: rentin.user")
-        password = st.text_input("Password", type="password", placeholder="Min 6 characters")
-        otp = st.text_input("Phone OTP (optional for now)", placeholder="123456")
-        terms = st.checkbox("I agree to Terms & Conditions")
-        go = st.form_submit_button("Create account", type="primary", use_container_width=True)
-
-    st.markdown("<div class='rb-auth-links'>", unsafe_allow_html=True)
-    st.markdown(f"<a href='{build_url(r='login', t=qp_get('t',''))}'>Back to login</a>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='rb-auth-divider'><span>OR</span></div>", unsafe_allow_html=True)
-    _auth_oauth_buttons_placeholder()
-
-    st.markdown(
-        "<div class='rb-auth-note'>Username cannot begin with numbers. Password must be at least 6 characters.</div>",
-        unsafe_allow_html=True,
-    )
-
-    if go:
-        u = (username or "").strip().lower()
-        if not terms:
-            st.error("You must accept Terms & Conditions.")
-        elif not u:
-            st.error("Username is required.")
-        elif re.match(r"^[0-9]", u):
-            st.error("Username cannot begin with numbers.")
-        elif not re.fullmatch(r"[a-z0-9._]{3,30}", u):
-            st.error("Username must be 3–30 chars and can use a-z 0-9 . _")
-        else:
-            ok, msg = create_user(email, phone, password)
-            if not ok:
-                st.error(msg)
-            else:
-                # set username into profiles
-                def _set_username():
-                    c = conn()
-                    cur = c.cursor()
-                    cur.execute("BEGIN IMMEDIATE;")
-                    row = cur.execute("SELECT id FROM users WHERE email=?", (normalize_email(email),)).fetchone()
-                    if not row:
-                        cur.execute("ROLLBACK;")
-                        c.close()
-                        return False, "Account created but cannot load user."
-                    uid = int(row["id"])
-                    try:
-                        cur.execute(
-                            "UPDATE profiles SET username=?, updated_at=? WHERE user_id=?",
-                            (u, now_iso(), uid)
-                        )
-                        cur.execute("COMMIT;")
-                        c.close()
-                        return True, "Account created."
-                    except sqlite3.IntegrityError:
-                        cur.execute("ROLLBACK;")
-                        c.close()
-                        return False, "Username already taken."
-
-                ok2, msg2 = with_retry(_set_username)
-                if ok2:
-                    st.success("Account created. Please login.")
-                    nav_to("login")
-                else:
-                    st.error(msg2)
-
-    _auth_shell_end()
-
-
-def page_reset():
-    _auth_shell_start()
-
-    st.markdown("<div class='rb-auth-top'>", unsafe_allow_html=True)
-    _render_auth_logo()
-    st.markdown("<h1 class='rb-auth-title'>Reset password</h1>", unsafe_allow_html=True)
-    st.markdown("<div class='rb-auth-sub'>Set a new password in seconds</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    with st.form("reset_form_main", clear_on_submit=False):
-        email = st.text_input("Email", placeholder="name@email.com")
-        new_password = st.text_input("New password", type="password", placeholder="Min 6 characters")
-        go = st.form_submit_button("Reset", type="primary", use_container_width=True)
-
-    st.markdown("<div class='rb-auth-links'>", unsafe_allow_html=True)
-    st.markdown(f"<a href='{build_url(r='login', t=qp_get('t',''))}'>Back to login</a>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    if go:
-        ok, msg = reset_password(email, new_password)
-        if ok:
-            st.success(msg)
-            nav_to("login")
-        else:
-            st.error(msg)
-
-    _auth_shell_end()
-
-
-# -----------------------------
-# MAIN ROUTING (REPLACE YOUR main() WITH THIS)
-# -----------------------------
-def main():
-    inject_style()
-    init_db()
-
-    st.session_state.setdefault("route", "login")
-    st.session_state.setdefault("page", "Feed")
-
-    url_r = qp_get("r", "")
-    url_p = qp_get("p", "")
-
-    if url_r:
-        st.session_state["route"] = url_r
-    if url_p:
-        st.session_state["page"] = url_p
-
-    # Auto-login from token
-    if not st.session_state.get("user_id"):
-        tok = qp_get("t", "")
-        if tok:
-            uid = load_session_from_token(tok)
-            if uid:
-                st.session_state["user_id"] = uid
-                st.session_state["session_token"] = tok
-                st.session_state["route"] = "app"
-
-    uid = st.session_state.get("user_id")
-
-    if not uid:
-        r = st.session_state.get("route", "login")
-        if r not in ["login", "register", "reset"]:
-            r = "login"
-        qp_set(r=r, t=qp_get("t", ""))
-
-        if r == "register":
-            page_register()
-        elif r == "reset":
-            page_reset()
-        else:
-            page_login()
-        return
-
-    # Logged in: keep URL synced
-    t = st.session_state.get("session_token") or qp_get("t", "")
-    p = st.session_state.get("page", "Feed") or "Feed"
-    qp_set(t=t, r="app", p=p)
-
-    st.session_state["route"] = "app"
-    app_router(int(uid))
-
-
-# === END DROP-IN REPLACEMENT ===
-Copy code
-Python
-# === IMPORTANT: FIX YOUR LOGO "WHITE LINE" + PHONE LAYOUT IN NAVBAR ===
-# Replace ONLY your render_logo() with this (keeps everything else).
-
-def render_logo():
-    logo = asset_path("logo.png")
-  
-        cur = c.cursor()
-        cur.execute("BEGIN IMMEDIATE;")
-        cur.execute("UPDATE sessions SET last_seen=? WHERE token=?", (now_iso(), token))
-        cur.execute("COMMIT;")
-        c.close()
-
-    with_retry(_touch)
-    return int(r["user_id"])
-
-
-def delete_session(token: str):
-    token = (token or "").strip()
-    if not token:
-        return
-
-    def _do():
-        c = conn()
-        cur = c.cursor()
-        cur.execute("BEGIN IMMEDIATE;")
-        cur.execute("DELETE FROM sessions WHERE token=?", (token,))
-        cur.execute("COMMIT;")
-        c.close()
-
-    with_retry(_do)
-
-
-def logout():
-    tok = st.session_state.get("session_token") or qp_get("t", "")
-    if tok:
-        delete_session(tok)
-    for k in list(st.session_state.keys()):
-        if k not in ["_db_inited"]:
-            st.session_state.pop(k, None)
-    qp_set(r="login")
-    st.rerun()
-
-
-def get_profile(uid: int) -> Dict[str, Any]:
-    def _do():
-        c = conn()
-        row = c.execute("""
-            SELECT u.id, u.email, u.phone,
-                   COALESCE(p.username,'') AS username,
-                   COALESCE(p.display_name,'') AS display_name,
-                   COALESCE(p.bio,'') AS bio
-            FROM users u
-            LEFT JOIN profiles p ON p.user_id=u.id
-            WHERE u.id=?
-        """, (uid,)).fetchone()
-        c.close()
-        return dict(row) if row else {}
-
-    return with_retry(_do)
-
-
-# =============================
-# UI STYLE (MOBILE-FIRST)
-# =============================
-def inject_style():
-    st.markdown("""
-    <style>
-      #MainMenu {visibility:hidden;}
-      footer {visibility:hidden;}
-      header {visibility:hidden;}
-
-      .stApp { background: #f6f8fb; }
-      section.main > div.block-container{
-        max-width: 1180px;
-        padding-top: 0.7rem;
-        padding-bottom: 4.5rem;
-      }
-      @media (max-width: 768px){
-        section.main > div.block-container{
-          padding-left: 0.9rem;
-          padding-right: 0.9rem;
-        }
-      }
-
-      /* NAV LINKS */
-      .rb-navwrap{
-        background:#fff;
-        border:1px solid #eef2f7;
-        border-radius:18px;
-        box-shadow: 0 18px 45px rgba(16,24,40,0.06);
-        padding: 10px 14px;
-      }
-      .rb-navrow{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-      .rb-logo{ display:flex; align-items:center; gap:10px; font-weight:950; font-size:18px; color:#0f172a; }
-      .rb-navlinks{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
-      .rb-navlinks a{
-        text-decoration:none !important;
-        border-radius:14px;
-        border:1px solid rgba(226,232,240,1);
-        background:#fff;
-        color:#0f172a;
-        padding:10px 14px;
-        font-weight:900;
-        display:inline-flex;
-        align-items:center;
-        gap:8px;
-      }
-      .rb-navlinks a:hover{ border-color: rgba(203,213,225,1); background:#fbfdff; }
-      .rb-navlinks a.rb-active{
-        background:#ff7a1a;
-        border-color:#ff7a1a;
-        color:#fff;
-        box-shadow: 0 10px 30px rgba(255, 122, 26, 0.20);
-      }
-
-      /* AUTH: full bg + centered card */
-      .rb-auth-bg{
-        position: fixed; inset: 0; z-index: 0; pointer-events:none;
-        background:
-          radial-gradient(900px 520px at 15% 20%, rgba(0, 229, 255, 0.16), transparent 60%),
-          radial-gradient(800px 480px at 85% 18%, rgba(255, 122, 26, 0.18), transparent 62%),
-          radial-gradient(900px 720px at 55% 90%, rgba(168, 85, 247, 0.16), transparent 64%),
-          linear-gradient(135deg, #05060b 0%, #070a14 45%, #04040a 100%);
-      }
-      section.main{ position: relative; z-index: 2; }
-
-      .rb-auth-shell{
-        max-width: 440px;
-        margin: 0 auto;
-        padding-top: 6vh;
-        padding-bottom: 6vh;
-      }
-      @media (max-width: 480px){
-        .rb-auth-shell{ max-width: 100%; padding-top: 3vh; }
-      }
-
-      .rb-auth-card{
-        background: rgba(255,255,255,0.06);
-        border: 1px solid rgba(255,255,255,0.14);
-        border-radius: 22px;
-        backdrop-filter: blur(14px);
-        -webkit-backdrop-filter: blur(14px);
-        box-shadow: 0 30px 90px rgba(0,0,0,0.40);
-        padding: 18px 16px 14px 16px;
-      }
-
-      .rb-auth-top{
-        display:flex; flex-direction:column; align-items:center; text-align:center; gap:10px;
-        margin-bottom: 10px;
-      }
-      .rb-auth-logoimg{ width:64px; height:64px; object-fit:contain; border-radius:18px; }
-      .rb-auth-title{ font-weight: 950; font-size: 30px; color: rgba(255,255,255,0.95); margin: 0; }
-      .rb-auth-sub{ color: rgba(255,255,255,0.75); font-size: 14px; margin-top: 4px; }
-
-      /* Inputs on dark */
-      .rb-auth-card .stTextInput input{
-        height: 46px !important;
-        border-radius: 14px !important;
-        border: 1px solid rgba(255,255,255,0.16) !important;
-        background: rgba(255,255,255,0.08) !important;
-        color: rgba(255,255,255,0.92) !important;
-      }
-      .rb-auth-card label{ color: rgba(255,255,255,0.86) !important; font-weight: 900 !important; }
-
-      /* Buttons */
-      .stButton>button{
-        border-radius: 14px !important;
-        border: 1px solid rgba(226,232,240,1) !important;
-        background: #ffffff !important;
-        color: #0f172a !important;
-        padding: 0.60rem 0.95rem !important;
-        font-weight: 900 !important;
-      }
-      .stButton>button[kind="primary"]{
-        background: #ff7a1a !important;
-        border-color: #ff7a1a !important;
-        color: white !important;
-        box-shadow: 0 10px 30px rgba(255, 122, 26, 0.20) !important;
-      }
-
-      /* Remove “white line” around images */
-      img{ outline:none !important; border:none !important; }
-    </style>
-    """, unsafe_allow_html=True)
-
-
-def render_brand_logo(size: int = 56):
-    logo = asset_path("logo.png")
-    if logo:
-        st.image(logo, width=size)
-    else:
-        st.markdown(f"<div style='font-size:{size-10}px; line-height:1;'>🏠</div>", unsafe_allow_html=True)
-
-
-def render_navbar(current_page: str, uid: int):
-    token = st.session_state.get("session_token") or qp_get("t", "")
-    def link(label: str, page: str):
-        href = build_url(t=token, r="app", p=page)
-        active = "rb-active" if current_page == page else ""
-        return f"<a class='{active}' href='{href}'>{label}</a>"
-
-    st.markdown("<div class='rb-navwrap'><div class='rb-navrow'>", unsafe_allow_html=True)
-
-    # left: logo + name
-    left = st.container()
-    with left:
-        cols = st.columns([0.22, 1.78], vertical_alignment="center")
-        with cols[0]:
-            logo = asset_path("logo.png")
-            if logo:
-                st.image(logo, width=40)
-            else:
-                st.write("🏠")
-        with cols[1]:
-            st.markdown("<div class='rb-logo'>RentinBerlin</div>", unsafe_allow_html=True)
-
-    # right: links
-    st.markdown(
-        "<div class='rb-navlinks'>"
-        + link("Home", "Feed")
-        + link("Profile", "Profile")
-        + link("Logout", "Logout")
-        + "</div>",
-        unsafe_allow_html=True
-    )
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
-
-# =============================
-# PAGES (AUTH)
-# =============================
-def auth_shell_start():
-    st.markdown("<div class='rb-auth-bg'></div>", unsafe_allow_html=True)
-    st.markdown("<div class='rb-auth-shell'>", unsafe_allow_html=True)
-    st.markdown("<div class='rb-auth-card'>", unsafe_allow_html=True)
-
-
-def auth_shell_end():
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
-
-def page_login():
-    auth_shell_start()
-
-    logo = asset_path("logo.png")
-    if logo:
-        st.markdown(f"""
-        <div class="rb-auth-top">
-          <img class="rb-auth-logoimg" src="app/static/{os.path.basename(logo)}" />
-        </div>
-        """, unsafe_allow_html=True)
-
-    # Safe logo render (works everywhere)
-    st.markdown("<div class='rb-auth-top'>", unsafe_allow_html=True)
-    render_brand_logo(64)
-    st.markdown(f"<h1 class='rb-auth-title'>Sign in</h1>", unsafe_allow_html=True)
-    st.markdown("<div class='rb-auth-sub'>Welcome back to RentinBerlin</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    with st.form("login_form", clear_on_submit=False):
-        email = st.text_input("Email", placeholder="name@email.com")
-        password = st.text_input("Password", type="password", placeholder="••••••••")
-        submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
-
-    row = st.columns(2)
-    if row[0].button("Create account", use_container_width=True, disabled=(not REGISTRATION_ENABLED)):
-        nav_to("register")
-    if row[1].button("Reset password", use_container_width=True):
-        nav_to("reset")
-
-    st.caption("Password must be at least 6 characters.")
-
-    if submitted:
-        uid = authenticate(email, password)
-        if not uid:
-            st.error("Wrong email or password.")
-        else:
-            token = create_session(uid)
-            st.session_state["user_id"] = uid
-            st.session_state["session_token"] = token
-            nav_to("app", page="Feed", token=token)
-
-    auth_shell_end()
-
-
-def page_register():
-    auth_shell_start()
-
-    st.markdown("<div class='rb-auth-top'>", unsafe_allow_html=True)
-    render_brand_logo(64)
-    st.markdown(f"<h1 class='rb-auth-title'>Create account</h1>", unsafe_allow_html=True)
-    st.markdown("<div class='rb-auth-sub'>Start posting and messaging in Berlin</div>", unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    with st.form("register_form", clear_on_submit=False):
-        email = st.text_input("Email", placeholder="name@email.com")
-        phone = st.text_input("Phone (optional)", placeholder="+49 …")
-        password = st.text_input("Password", type="password", placeholder="min 6 characters")
-        submitted = st.form_submit_button("Create account", type="primary", use_container_width=True)
-
-    st.cafrom typing import Optional, Dict, Any, List, Tuple
 from urllib.parse import quote_plus
 
 import streamlit as st
@@ -1408,6 +570,8 @@ def inject_style():
             .rb-subtitle { font-size: 14px !important; }
             .rb-navwrap { padding: 8px 10px !important; }
             .stButton>button { padding: 0.5rem 0.7rem !important; font-size: 12px !important; }
+            .rb-auth-card { padding: 18px 16px 14px 16px !important; }
+            .rb-auth-title { font-size: 26px !important; }
           }
 
           .stButton>button {
@@ -1510,10 +674,107 @@ def inject_style():
             font-weight: 950 !important;
             box-shadow: 0 18px 45px rgba(16, 24, 40, 0.18) !important;
           }
+
+          /* =============================
+             FUTURISTIC AUTH (LOGIN/REGISTER)
+             Add ONLY - does not remove anything above
+             ============================= */
+
+          /* make auth screens use full viewport feel */
+          section.main > div.block-container { position: relative; z-index: 1; }
+
+          .rb-auth-bg{
+            position: fixed;
+            inset: 0;
+            z-index: 0;
+            background:
+              radial-gradient(1200px 700px at 15% 10%, rgba(255,122,26,0.22), transparent 60%),
+              radial-gradient(900px 600px at 80% 15%, rgba(99,102,241,0.22), transparent 55%),
+              radial-gradient(900px 700px at 55% 85%, rgba(16,185,129,0.16), transparent 55%),
+              linear-gradient(180deg, rgba(2,6,23,0.45), rgba(2,6,23,0.88)),
+              url("assets/login_bg.jpg");
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            filter: saturate(1.12) contrast(1.05);
+          }
+
+          .rb-auth-wrap{
+            position: relative;
+            z-index: 1;
+            padding-top: 6vh;
+            padding-bottom: 6vh;
+          }
+
+          .rb-auth-card{
+            border-radius: 22px;
+            border: 1px solid rgba(255,255,255,0.18);
+            background: rgba(255,255,255,0.10);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+            box-shadow: 0 30px 90px rgba(0,0,0,0.35);
+            padding: 22px 20px 18px 20px;
+          }
+
+          .rb-auth-brand .rb-logo{
+            color: white !important;
+            font-size: 18px !important;
+          }
+
+          .rb-auth-title{
+            font-size: 30px;
+            font-weight: 950;
+            color: white;
+            margin-top: 8px;
+          }
+
+          .rb-auth-subtitle{
+            color: rgba(255,255,255,0.75);
+            font-size: 13px;
+            margin-top: 6px;
+          }
+
+          /* Inputs look glassy inside auth card */
+          .rb-auth-card .stTextInput input{
+            background: rgba(255,255,255,0.10) !important;
+            color: white !important;
+            border: 1px solid rgba(255,255,255,0.18) !important;
+            border-radius: 14px !important;
+          }
+          .rb-auth-card .stTextInput label{
+            color: rgba(255,255,255,0.85) !important;
+            font-weight: 900 !important;
+          }
+          .rb-auth-card .stTextInput input::placeholder{
+            color: rgba(255,255,255,0.55) !important;
+          }
+
+          /* Buttons on auth card */
+          .rb-auth-card .stButton>button{
+            background: rgba(255,255,255,0.12) !important;
+            color: white !important;
+            border: 1px solid rgba(255,255,255,0.22) !important;
+          }
+          .rb-auth-card .stButton>button:hover{
+            background: rgba(255,255,255,0.18) !important;
+          }
+          .rb-auth-card .stButton>button[kind="primary"]{
+            background: #ff7a1a !important;
+            border-color: #ff7a1a !important;
+            color: white !important;
+            box-shadow: 0 18px 45px rgba(255,122,26,0.25) !important;
+          }
+
+          /* Make Streamlit alert boxes readable on dark bg */
+          .rb-auth-card [data-testid="stAlert"]{
+            border-radius: 14px;
+          }
+
         </style>
         """,
         unsafe_allow_html=True,
     )
+
 
 
 def chip_html(text: str, dark: bool = False) -> str:
@@ -2760,97 +2021,373 @@ def render_listing_card(uid: int, p: Dict[str, Any], ctx: str = "card"):
 # PAGES
 # =============================
 def page_login():
-    st.markdown("<div class='rb-card'>", unsafe_allow_html=True)
-    cols = st.columns([1.3, 1.0], vertical_alignment="center")
+    
+    with st.container():
+        st.markdown("<div class='center-box'>", unsafe_allow_html=True)
 
-    with cols[0]:
-        render_logo()
-        st.caption("Login to your account (Berlin time)")
+        # Logo
+        logo = asset_path("logo.png")
+        if logo:
+            st.image(logo, width=96)
 
-    with cols[1]:
-        if REGISTRATION_ENABLED and st.button("Register", use_container_width=True):
+        st.markdown(
+            """
+            <h2 style="text-align:center;margin-bottom:4px;">RentinBerlin</h2>
+            <p style="text-align:center;color:#6b7280;margin-bottom:24px;">
+            Find homes. Connect. Move smarter.
+            </p>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        with st.form("login_form", clear_on_submit=False):
+            email = st.text_input(
+                "Email or phone",
+                placeholder="you@email.com",
+            )
+            password = st.text_input(
+                "Password",
+                type="password",
+                placeholder="••••••••",
+                help="Minimum 6 characters",
+            )
+
+            st.markdown(
+                "<div style='text-align:right;margin-top:-6px;'>"
+                "<span style='font-size:13px;color:#64748b;'>Forgot password?</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+            submit = st.form_submit_button("Login", type="primary", use_container_width=True)
+
+        if submit:
+            uid = authenticate(email, password)
+            if not uid:
+                st.error("Invalid email or password.")
+            else:
+                token = create_session(uid)
+                st.session_state["user_id"] = uid
+                st.session_state["session_token"] = token
+                set_query_token(token)
+                st.session_state["route"] = "app"
+                st.session_state["page"] = "Feed"
+                st.rerun()
+
+        st.divider()
+
+        st.button("Continue with Google (coming soon)", disabled=True, use_container_width=True)
+        st.button("Continue with Apple (coming soon)", disabled=True, use_container_width=True)
+
+        st.markdown(
+            "<p style='text-align:center;margin-top:18px;font-size:14px;'>"
+            "New to RentinBerlin? "
+            "<a href='#' onclick=\"window.scrollTo(0,0)\">Create account</a>"
+            "</p>",
+            unsafe_allow_html=True,
+        )
+
+        if st.button("Create account", use_container_width=True):
             st.session_state["route"] = "register"
             st.rerun()
 
-    st.write("")
-    with st.form("login_form"):
-        email = st.text_input("Email")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Login", type="primary")
-
-    c = st.columns([1, 1, 8])
-    if c[0].button("Reset password"):
-        st.session_state["route"] = "reset"
-        st.rerun()
-
-    if submitted:
-        uid = authenticate(email, password)
-        if not uid:
-            st.error("Wrong email or password.")
-        else:
-            token = create_session(uid)
-            st.session_state["user_id"] = uid
-            st.session_state["session_token"] = token
-            set_query_token(token)
-            st.session_state["route"] = "app"
-            st.session_state["page"] = "Feed"
+        if st.button("Reset password", use_container_width=True):
+            st.session_state["route"] = "reset"
             st.rerun()
 
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
 
 
 def page_register():
-    st.markdown("<div class='rb-card'>", unsafe_allow_html=True)
-    cols = st.columns([1.3, 1.0], vertical_alignment="center")
+    st.markdown(
+        """
+        <style>
+          .rb-auth-bg{
+            position:fixed; inset:0; z-index:0; pointer-events:none;
+            background:
+              radial-gradient(900px 520px at 16% 18%, rgba(0,229,255,0.12), transparent 60%),
+              radial-gradient(900px 520px at 84% 18%, rgba(255,122,26,0.14), transparent 60%),
+              radial-gradient(900px 700px at 55% 92%, rgba(168,85,247,0.12), transparent 64%),
+              linear-gradient(180deg, #f6f8fb 0%, #f7f9fc 100%);
+          }
+          section.main{ position:relative; z-index:2; }
+          .rb-auth-topspace{ height: 4vh; }
+          @media (max-width: 900px){ .rb-auth-topspace{ height: 2vh; } }
 
-    with cols[0]:
-        render_logo()
-        st.caption("Create a new account")
+          div[data-testid="stVerticalBlockBorderWrapper"]{
+            background: rgba(255,255,255,0.86) !important;
+            border: 1px solid rgba(226,232,240,1) !important;
+            border-radius: 22px !important;
+            box-shadow: 0 22px 70px rgba(16,24,40,0.10) !important;
+          }
 
-    with cols[1]:
-        if st.button("Login", use_container_width=True):
-            st.session_state["route"] = "login"
-            st.rerun()
+          .rb-auth-title{
+            text-align:center; font-weight:950; font-size:26px; color:#0f172a; margin: 6px 0 0 0;
+          }
+          .rb-auth-sub{
+            text-align:center; color:#64748b; font-size:13px; margin: 6px 0 0 0;
+          }
+          .rb-or{ text-align:center; color:#64748b; font-size:12px; margin-top: 12px; margin-bottom: 6px; }
 
-    st.write("")
-    with st.form("reg_form"):
-        email = st.text_input("Email")
-        phone = st.text_input("Phone (optional)")
-        password = st.text_input("Password (min 6 chars)", type="password")
-        submitted = st.form_submit_button("Create account", type="primary")
+          .rb-link button{
+            padding: 0 !important;
+            border: none !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            color: #ff7a1a !important;
+            font-weight: 950 !important;
+          }
 
-    if submitted:
-        ok, msg = create_user(email, phone, password)
-        if ok:
-            st.success(msg)
-            st.session_state["route"] = "login"
-            st.rerun()
-        else:
-            st.error(msg)
+          .stTextInput input{
+            height: 46px !important;
+            border-radius: 14px !important;
+            border: 1px solid rgba(226,232,240,1) !important;
+            background: #ffffff !important;
+          }
+          .stTextInput input:focus{
+            border-color: rgba(255,122,26,0.65) !important;
+            box-shadow: 0 0 0 4px rgba(255,122,26,0.16) !important;
+          }
+        </style>
+        <div class="rb-auth-bg"></div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    def _valid_username(u: str) -> bool:
+        u = (u or "").strip()
+        if not u:
+            return False
+        if u[0].isdigit():
+            return False
+        return bool(re.fullmatch(r"[a-zA-Z0-9._]{3,30}", u))
+
+    def _otp_code() -> str:
+        return f"{random.randint(100000, 999999)}"
+
+    st.session_state.setdefault("signup_otp_sent", False)
+    st.session_state.setdefault("signup_otp_code", "")
+    st.session_state.setdefault("signup_phone_norm", "")
+
+    st.markdown("<div class='rb-auth-topspace'></div>", unsafe_allow_html=True)
+    left, mid, right = st.columns([1, 1.25, 1])
+
+    with mid:
+        with st.container(border=True):
+            st.write("")
+            logo = asset_path("logo.png")
+            if logo and os.path.exists(logo):
+                st.image(logo, width=84)
+            st.markdown(f"<div class='rb-auth-title'>{APP_NAME}</div>", unsafe_allow_html=True)
+            st.markdown("<div class='rb-auth-sub'>Create your account in minutes.</div>", unsafe_allow_html=True)
+            st.write("")
+
+            st.markdown("<div class='rb-or'>continue with</div>", unsafe_allow_html=True)
+            g, a = st.columns(2)
+            if g.button("Continue with Google", use_container_width=True, key="signup_google"):
+                st.info("Google signup UI only (connect OAuth later).")
+            if a.button("Continue with Apple", use_container_width=True, key="signup_apple"):
+                st.info("Apple signup UI only (connect OAuth later).")
+
+            st.markdown("<div class='rb-or'>or sign up with email</div>", unsafe_allow_html=True)
+
+            with st.form("signup_form_center"):
+                email = st.text_input("Email", placeholder="name@email.com")
+                username = st.text_input("Username", placeholder="e.g. maria_berlin")
+                st.caption("Suggestion: username cannot begin with numbers. Allowed: letters, numbers, dot, underscore (3–30).")
+
+                phone = st.text_input("Phone number", placeholder="+491701234567")
+                otp_cols = st.columns([1.0, 1.2])
+                with otp_cols[0]:
+                    send_otp = st.form_submit_button("Send OTP", use_container_width=True)
+                with otp_cols[1]:
+                    otp = st.text_input("OTP code", placeholder="6-digit code")
+
+                password = st.text_input("Password", type="password", placeholder="Minimum 6 characters")
+                st.caption("Suggestion: use at least 6 characters. Mix letters + numbers.")
+
+                tcs = st.checkbox("I agree to Terms & Conditions")
+                create_btn = st.form_submit_button("Create account", type="primary", use_container_width=True)
+
+            if send_otp:
+                pn = normalize_phone(phone)
+                if not pn or len(pn) < 8:
+                    st.error("Enter a valid phone number before sending OTP.")
+                else:
+                    code = _otp_code()
+                    st.session_state["signup_otp_sent"] = True
+                    st.session_state["signup_otp_code"] = code
+                    st.session_state["signup_phone_norm"] = pn
+                    st.info(f"OTP sent (demo): {code}")
+
+            if create_btn:
+                email_n = (email or "").strip().lower()
+                pwd = (password or "").strip()
+                user = (username or "").strip()
+                phone_n = normalize_phone(phone)
+
+                if not tcs:
+                    st.error("Please accept Terms & Conditions to continue.")
+                    return
+                if not email_n or "@" not in email_n:
+                    st.error("Enter a valid email.")
+                    return
+                if len(pwd) < 6:
+                    st.error("Password must be at least 6 characters.")
+                    return
+                if not _valid_username(user):
+                    st.error("Username invalid. It cannot start with numbers, and must be 3–30 chars (letters/numbers/._).")
+                    return
+                if not phone_n or len(phone_n) < 8:
+                    st.error("Enter a valid phone number for OTP verification.")
+                    return
+                if not st.session_state.get("signup_otp_sent"):
+                    st.error("Please send OTP first.")
+                    return
+                if phone_n != st.session_state.get("signup_phone_norm"):
+                    st.error("Phone number changed. Please send OTP again.")
+                    return
+                if (otp or "").strip() != (st.session_state.get("signup_otp_code") or ""):
+                    st.error("Wrong OTP code.")
+                    return
+
+                ok, msg = create_user(email_n, phone_n, pwd)
+                if not ok:
+                    st.error(msg)
+                    return
+
+                def _get_uid_by_email():
+                    c = conn()
+                    row = c.execute("SELECT id FROM users WHERE email=?", (email_n,)).fetchone()
+                    c.close()
+                    return int(row["id"]) if row else None
+
+                new_uid = with_retry(_get_uid_by_email)
+                if new_uid:
+                    try:
+                        u = get_user(new_uid)
+                        update_profile(
+                            user_id=new_uid,
+                            username=user,
+                            display_name=u.get("display_name", ""),
+                            bio=u.get("bio", ""),
+                            avatar_path=u.get("avatar_path", ""),
+                            bio_pic_path=u.get("bio_pic_path", ""),
+                            gender=u.get("gender", None),
+                        )
+                    except Exception as e:
+                        st.warning(f"Account created, but username update failed: {e}")
+
+                st.success("Account created. Please sign in.")
+                st.session_state["signup_otp_sent"] = False
+                st.session_state["signup_otp_code"] = ""
+                st.session_state["signup_phone_norm"] = ""
+                st.session_state["route"] = "login"
+                st.rerun()
+
+            st.write("")
+            st.markdown("<div class='rb-link' style='text-align:center;'>", unsafe_allow_html=True)
+            if st.button("Back to login", use_container_width=True, key="back_to_login_from_signup"):
+                st.session_state["route"] = "login"
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.write("")
+
+
 
 
 def page_reset():
-    st.markdown("<div class='rb-card'>", unsafe_allow_html=True)
-    st.markdown("## Reset Password")
-    with st.form("reset_form"):
-        email = st.text_input("Email")
-        new_password = st.text_input("New password", type="password")
-        submitted = st.form_submit_button("Reset", type="primary")
+    st.markdown(
+        """
+        <style>
+          .rb-auth-bg{
+            position:fixed; inset:0; z-index:0; pointer-events:none;
+            background:
+              radial-gradient(900px 520px at 16% 18%, rgba(0,229,255,0.12), transparent 60%),
+              radial-gradient(900px 520px at 84% 18%, rgba(255,122,26,0.14), transparent 60%),
+              radial-gradient(900px 700px at 55% 92%, rgba(168,85,247,0.12), transparent 64%),
+              linear-gradient(180deg, #f6f8fb 0%, #f7f9fc 100%);
+          }
+          section.main{ position:relative; z-index:2; }
+          .rb-auth-topspace{ height: 6vh; }
+          @media (max-width: 900px){ .rb-auth-topspace{ height: 3vh; } }
 
-    if submitted:
-        ok, msg = reset_password(email, new_password)
-        (st.success(msg) if ok else st.error(msg))
-        if ok:
-            st.session_state["route"] = "login"
-            st.rerun()
+          div[data-testid="stVerticalBlockBorderWrapper"]{
+            background: rgba(255,255,255,0.86) !important;
+            border: 1px solid rgba(226,232,240,1) !important;
+            border-radius: 22px !important;
+            box-shadow: 0 22px 70px rgba(16,24,40,0.10) !important;
+          }
 
-    if st.button("Back to login"):
-        st.session_state["route"] = "login"
-        st.rerun()
+          .rb-auth-title{
+            text-align:center; font-weight:950; font-size:26px; color:#0f172a; margin: 6px 0 0 0;
+          }
+          .rb-auth-sub{
+            text-align:center; color:#64748b; font-size:13px; margin: 6px 0 0 0;
+          }
 
-    st.markdown("</div>", unsafe_allow_html=True)
+          .rb-link button{
+            padding: 0 !important;
+            border: none !important;
+            background: transparent !important;
+            box-shadow: none !important;
+            color: #ff7a1a !important;
+            font-weight: 950 !important;
+          }
+
+          .stTextInput input{
+            height: 46px !important;
+            border-radius: 14px !important;
+            border: 1px solid rgba(226,232,240,1) !important;
+            background: #ffffff !important;
+          }
+          .stTextInput input:focus{
+            border-color: rgba(255,122,26,0.65) !important;
+            box-shadow: 0 0 0 4px rgba(255,122,26,0.16) !important;
+          }
+        </style>
+        <div class="rb-auth-bg"></div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div class='rb-auth-topspace'></div>", unsafe_allow_html=True)
+    left, mid, right = st.columns([1, 1.15, 1])
+
+    with mid:
+        with st.container(border=True):
+            st.write("")
+            logo = asset_path("logo.png")
+            if logo and os.path.exists(logo):
+                st.image(logo, width=84)
+            st.markdown(f"<div class='rb-auth-title'>{APP_NAME}</div>", unsafe_allow_html=True)
+            st.markdown("<div class='rb-auth-sub'>Reset your password securely.</div>", unsafe_allow_html=True)
+            st.write("")
+
+            with st.form("reset_form_center"):
+                email = st.text_input("Email", placeholder="name@email.com")
+                new_password = st.text_input("New password", type="password", placeholder="Minimum 6 characters")
+                st.caption("Suggestion: use at least 6 characters.")
+                submitted = st.form_submit_button("Reset password", type="primary", use_container_width=True)
+
+            if submitted:
+                ok, msg = reset_password(email, new_password)
+                if ok:
+                    st.success(msg)
+                    st.session_state["route"] = "login"
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+            st.write("")
+            st.markdown("<div class='rb-link' style='text-align:center;'>", unsafe_allow_html=True)
+            if st.button("Back to login", use_container_width=True, key="back_to_login_from_reset"):
+                st.session_state["route"] = "login"
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.write("")
+
 
 
 def page_feed(uid: int):
