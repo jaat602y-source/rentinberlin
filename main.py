@@ -1,84 +1,29 @@
-# main.py
-# Run: streamlit run main.py
-# RentinBerlin — ONE-FILE Streamlit app (Website-like URL routing + Mobile-first auth + SQLite)
+# === DROP-IN REPLACEMENT (AUTH + ROUTE + MOBILE FIX) ===
+# Paste these functions into your existing big file (keep your other pages/features as-is).
+# Replace ONLY:
+# inject_style()
+# page_login()
+# page_register()
+# page_reset()
+# main() routing section (the part that decides which page to show)
+# Everything else in your big code stays.
 
 import os
 import re
-import time
 import uuid
+import time
 import sqlite3
 import hashlib
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
-from urllib.parse import urlencode
+from typing import Optional, Dict, Any, List, Tuple
+from urllib.parse import quote_plus, urlencode
 
 import streamlit as st
+import streamlit.components.v1 as components
 
-# =============================
-# CONFIG
-# =============================
-APP_NAME = "RentinBerlin"
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "berlinrent_social.db")
-ASSETS_DIR = os.path.join(BASE_DIR, "assets")
-os.makedirs(ASSETS_DIR, exist_ok=True)
-
-SESSION_DAYS = 30
-REGISTRATION_ENABLED = True
-
-# Berlin timezone
-try:
-    from zoneinfo import ZoneInfo
-    BERLIN_TZ = ZoneInfo("Europe/Berlin")
-except Exception:
-    BERLIN_TZ = None
-
-# favicon
-favicon = "🏠"
-try:
-    from PIL import Image
-    fav_path = os.path.join(ASSETS_DIR, "logo.png")
-    if os.path.exists(fav_path):
-        favicon = Image.open(fav_path)
-except Exception:
-    pass
-
-st.set_page_config(page_title=APP_NAME, page_icon=favicon, layout="wide")
-
-
-# =============================
-# TIME / UTIL
-# =============================
-def now_berlin_dt() -> datetime:
-    return datetime.now(BERLIN_TZ) if BERLIN_TZ else datetime.now()
-
-
-def now_iso() -> str:
-    return now_berlin_dt().replace(microsecond=0).isoformat()
-
-
-def sha256(s: str) -> str:
-    return hashlib.sha256((s or "").encode("utf-8")).hexdigest()
-
-
-def normalize_email(e: str) -> str:
-    return (e or "").strip().lower()
-
-
-def normalize_phone(p: str) -> str:
-    p = (p or "").strip()
-    p = re.sub(r"[^\d+]", "", p)
-    return p[:25]
-
-
-def asset_path(name: str) -> str:
-    p = os.path.join(ASSETS_DIR, name)
-    return p if os.path.exists(p) else ""
-
-
-# =============================
-# QUERY PARAMS = WEBSITE ROUTING
-# =============================
+# -----------------------------
+# QUERY PARAMS HELPERS (website-like routing)
+# -----------------------------
 def qp_get(key: str, default: str = "") -> str:
     try:
         v = st.query_params.get(key)
@@ -125,244 +70,515 @@ def nav_to(route: str, page: str = "", token: str = ""):
     st.rerun()
 
 
-# =============================
-# DB
-# =============================
-def conn():
-    c = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL;")
-    c.execute("PRAGMA synchronous=NORMAL;")
-    c.execute("PRAGMA busy_timeout=8000;")
-    return c
+# -----------------------------
+# STYLE (KEEP EVERYTHING + ADD AUTH + MOBILE FIX)
+# -----------------------------
+def inject_style():
+    st.markdown(
+        """
+        <style>
+          .stApp { background: #f6f8fb; }
+          section.main > div.block-container { padding-top: 0.7rem; padding-bottom: 4.5rem; max-width: 1280px; }
+
+          #MainMenu {visibility: hidden;}
+          footer {visibility: hidden;}
+          header {visibility: hidden;}
+
+          @media (max-width: 768px) {
+            section.main > div.block-container { padding-left: 0.75rem; padding-right: 0.75rem; }
+            .rb-title { font-size: 34px !important; }
+            .rb-subtitle { font-size: 14px !important; }
+            .rb-navwrap { padding: 8px 10px !important; }
+            .stButton>button { padding: 0.5rem 0.7rem !important; font-size: 12px !important; }
+          }
+
+          .stButton>button {
+            border-radius: 14px !important;
+            border: 1px solid rgba(226,232,240,1) !important;
+            background: #ffffff !important;
+            color: #0f172a !important;
+            padding: 0.55rem 0.9rem !important;
+            font-weight: 900 !important;
+          }
+          .stButton>button:hover {
+            border-color: rgba(203,213,225,1) !important;
+            background: #fbfdff !important;
+          }
+          .stButton>button[kind="primary"] {
+            background: #ff7a1a !important;
+            border-color: #ff7a1a !important;
+            color: white !important;
+            box-shadow: 0 10px 30px rgba(255, 122, 26, 0.20) !important;
+          }
+
+          .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] {
+            border-radius: 14px !important;
+          }
+
+          .rb-card {
+            background: #ffffff;
+            border: 1px solid #eef2f7;
+            border-radius: 18px;
+            box-shadow: 0 18px 45px rgba(16, 24, 40, 0.06);
+            padding: 14px;
+          }
+          .rb-card-tight {
+            background: #ffffff;
+            border: 1px solid #eef2f7;
+            border-radius: 18px;
+            box-shadow: 0 18px 45px rgba(16, 24, 40, 0.06);
+            padding: 0;
+            overflow: hidden;
+          }
+
+          .rb-muted { color: #6b7280; font-size: 12px; }
+          .rb-title { font-weight: 950; font-size: 46px; line-height: 1.03; margin: 0; color:#0f172a;}
+          .rb-subtitle { font-size: 16px; color:#6b7280; margin-top: 10px; }
+
+          .rb-chip{
+            display:inline-flex;
+            align-items:center;
+            font-size:12px;
+            padding:6px 10px;
+            border-radius:999px;
+            margin-right:8px;
+            margin-bottom:8px;
+            font-weight:900;
+            border:1px solid #e5e7eb;
+            background:#f8fafc;
+            color:#0f172a;
+            white-space:nowrap;
+          }
+          .rb-chip-dark{ background:#0f172a; border-color:#0f172a; color:white; }
+
+          .rb-section-title { font-size: 26px; font-weight: 950; margin-top: 8px; color:#0f172a; }
+
+          .rb-navwrap {
+            background: #ffffff;
+            border: 1px solid #eef2f7;
+            border-radius: 18px;
+            box-shadow: 0 18px 45px rgba(16, 24, 40, 0.06);
+            padding: 10px 14px;
+          }
+          .rb-logo { display:flex; align-items:center; gap:10px; font-weight:950; font-size:18px; color:#0f172a; }
+
+          .rb-bubble-me {
+            background: #ffedd5;
+            border: 1px solid #fed7aa;
+            padding: 10px 12px;
+            border-radius: 16px;
+            font-weight: 900;
+            color: #0f172a;
+          }
+          .rb-bubble-them {
+            background: #f1f5f9;
+            border: 1px solid #e2e8f0;
+            padding: 10px 12px;
+            border-radius: 16px;
+            font-weight: 900;
+            color: #0f172a;
+          }
+
+          .rb-fab {
+            position: fixed;
+            right: 18px;
+            bottom: 18px;
+            z-index: 9999;
+          }
+          .rb-fab button {
+            border-radius: 999px !important;
+            padding: 14px 16px !important;
+            font-weight: 950 !important;
+            box-shadow: 0 18px 45px rgba(16, 24, 40, 0.18) !important;
+          }
+
+          /* =============================
+             AUTH (LOGIN / REGISTER / RESET) — MOBILE FIRST + CENTER
+             ============================= */
+
+          .rb-auth-bg{
+            position: fixed;
+            inset: 0;
+            z-index: 0;
+            pointer-events:none;
+            background:
+              radial-gradient(900px 520px at 15% 20%, rgba(0, 229, 255, 0.16), transparent 60%),
+              radial-gradient(800px 480px at 85% 18%, rgba(255, 122, 26, 0.18), transparent 62%),
+              radial-gradient(900px 720px at 55% 90%, rgba(168, 85, 247, 0.16), transparent 64%),
+              linear-gradient(135deg, #05060b 0%, #070a14 45%, #04040a 100%);
+          }
+          section.main { position: relative; z-index: 2; }
+
+          .rb-auth-shell{
+            max-width: 460px;
+            margin: 0 auto;
+            padding-top: 6vh;
+            padding-bottom: 6vh;
+          }
+          @media (max-width: 520px){
+            .rb-auth-shell{ max-width: 100%; padding-top: 3vh; padding-bottom: 3vh; }
+          }
+
+          .rb-auth-card{
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 22px;
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            box-shadow: 0 30px 90px rgba(0,0,0,0.40);
+            padding: 18px 16px 14px 16px;
+          }
+
+          .rb-auth-top{
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            text-align:center;
+            gap:10px;
+            margin-bottom: 10px;
+          }
+          .rb-auth-logoimg{
+            width:72px;
+            height:72px;
+            object-fit:contain;
+            border-radius:18px;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.12);
+          }
+          .rb-auth-title{
+            font-weight: 950;
+            font-size: 32px;
+            color: rgba(255,255,255,0.95);
+            margin: 0;
+            letter-spacing: 0.3px;
+          }
+          .rb-auth-sub{
+            color: rgba(255,255,255,0.75);
+            font-size: 14px;
+            margin-top: 2px;
+          }
+
+          .rb-auth-card .stTextInput input{
+            height: 46px !important;
+            border-radius: 14px !important;
+            border: 1px solid rgba(255,255,255,0.16) !important;
+            background: rgba(255,255,255,0.08) !important;
+            color: rgba(255,255,255,0.92) !important;
+          }
+          .rb-auth-card .stTextInput input::placeholder{
+            color: rgba(255,255,255,0.45) !important;
+          }
+          .rb-auth-card label{
+            color: rgba(255,255,255,0.86) !important;
+            font-weight: 900 !important;
+          }
+
+          .rb-auth-links{
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:12px;
+            margin-top: 8px;
+            flex-wrap: wrap;
+          }
+          .rb-auth-links a{
+            color: rgba(255,255,255,0.86);
+            font-weight: 900;
+            text-decoration: none !important;
+            font-size: 13px;
+            border-bottom: 1px dashed rgba(255,255,255,0.18);
+            padding-bottom: 2px;
+          }
+          .rb-auth-links a:hover{
+            color: white;
+            border-bottom-color: rgba(255,255,255,0.35);
+          }
+
+          .rb-auth-divider{
+            margin: 12px 0;
+            display:flex;
+            align-items:center;
+            gap:10px;
+          }
+          .rb-auth-divider:before,
+          .rb-auth-divider:after{
+            content:"";
+            height:1px;
+            flex:1;
+            background: rgba(255,255,255,0.14);
+          }
+          .rb-auth-divider span{
+            font-size: 12px;
+            color: rgba(255,255,255,0.65);
+            font-weight: 900;
+          }
+
+          .rb-auth-note{
+            font-size: 12px;
+            color: rgba(255,255,255,0.70);
+            line-height: 1.35;
+          }
+
+          img { outline:none !important; border:none !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def with_retry(fn, tries: int = 12, base_sleep: float = 0.12):
-    last = None
-    for i in range(tries):
-        try:
-            return fn()
-        except sqlite3.OperationalError as e:
-            last = e
-            msg = str(e).lower()
-            if "locked" in msg or "busy" in msg:
-                time.sleep(base_sleep * (i + 1))
-                continue
-            raise
-    raise last
+# -----------------------------
+# AUTH UI HELPERS
+# -----------------------------
+def _auth_shell_start():
+    st.markdown("<div class='rb-auth-bg'></div>", unsafe_allow_html=True)
+    st.markdown("<div class='rb-auth-shell'>", unsafe_allow_html=True)
+    st.markdown("<div class='rb-auth-card'>", unsafe_allow_html=True)
 
 
-def init_db():
-    if st.session_state.get("_db_inited"):
+def _auth_shell_end():
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def _render_auth_logo():
+    logo = asset_path("logo.png")
+    if logo and os.path.exists(logo):
+        st.image(logo, width=72)
+    else:
+        st.markdown(
+            "<div class='rb-auth-logoimg' style='display:flex;align-items:center;justify-content:center;font-size:34px;'>🏠</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def _auth_oauth_buttons_placeholder():
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("Continue with Google", use_container_width=True, disabled=True)
+    with col2:
+        st.button("Continue with Apple", use_container_width=True, disabled=True)
+
+
+# -----------------------------
+# AUTH PAGES (WORKING EMAIL/PASSWORD NOW)
+# -----------------------------
+def page_login():
+    _auth_shell_start()
+
+    st.markdown("<div class='rb-auth-top'>", unsafe_allow_html=True)
+    _render_auth_logo()
+    st.markdown("<h1 class='rb-auth-title'>Sign in</h1>", unsafe_allow_html=True)
+    st.markdown("<div class='rb-auth-sub'>Logo top center • clean • mobile-ready</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    with st.form("login_form_main", clear_on_submit=False):
+        email_or_phone = st.text_input("Email or Phone", placeholder="name@email.com or +49...")
+        password = st.text_input("Password", type="password", placeholder="Min 6 characters")
+        go = st.form_submit_button("Login", type="primary", use_container_width=True)
+
+    st.markdown("<div class='rb-auth-links'>", unsafe_allow_html=True)
+    st.markdown(f"<a href='{build_url(r='reset', t=qp_get('t',''))}'>Forgot password?</a>", unsafe_allow_html=True)
+    st.markdown(f"<a href='{build_url(r='register', t=qp_get('t',''))}'>New to RentinBerlin? Create account</a>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='rb-auth-divider'><span>OR</span></div>", unsafe_allow_html=True)
+    _auth_oauth_buttons_placeholder()
+
+    st.markdown(
+        "<div class='rb-auth-note'>Password must be at least 6 characters.</div>",
+        unsafe_allow_html=True,
+    )
+
+    if go:
+        e = normalize_email(email_or_phone)
+        p = normalize_phone(email_or_phone)
+        uid = None
+        if "@" in e:
+            uid = authenticate(e, password)
+        else:
+            # phone login (optional): map phone->email user if you want; for now keep email login only
+            uid = None
+
+        if not uid:
+            st.error("Wrong email or password.")
+        else:
+            token = create_session(uid)
+            st.session_state["user_id"] = uid
+            st.session_state["session_token"] = token
+            nav_to("app", page="Feed", token=token)
+
+    _auth_shell_end()
+
+
+def page_register():
+    _auth_shell_start()
+
+    st.markdown("<div class='rb-auth-top'>", unsafe_allow_html=True)
+    _render_auth_logo()
+    st.markdown("<h1 class='rb-auth-title'>Create account</h1>", unsafe_allow_html=True)
+    st.markdown("<div class='rb-auth-sub'>Classic, centered, professional</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    with st.form("register_form_main", clear_on_submit=False):
+        email = st.text_input("Email", placeholder="name@email.com")
+        phone = st.text_input("Phone (optional)", placeholder="+49 ...")
+        username = st.text_input("Username", placeholder="example: rentin.user")
+        password = st.text_input("Password", type="password", placeholder="Min 6 characters")
+        otp = st.text_input("Phone OTP (optional for now)", placeholder="123456")
+        terms = st.checkbox("I agree to Terms & Conditions")
+        go = st.form_submit_button("Create account", type="primary", use_container_width=True)
+
+    st.markdown("<div class='rb-auth-links'>", unsafe_allow_html=True)
+    st.markdown(f"<a href='{build_url(r='login', t=qp_get('t',''))}'>Back to login</a>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='rb-auth-divider'><span>OR</span></div>", unsafe_allow_html=True)
+    _auth_oauth_buttons_placeholder()
+
+    st.markdown(
+        "<div class='rb-auth-note'>Username cannot begin with numbers. Password must be at least 6 characters.</div>",
+        unsafe_allow_html=True,
+    )
+
+    if go:
+        u = (username or "").strip().lower()
+        if not terms:
+            st.error("You must accept Terms & Conditions.")
+        elif not u:
+            st.error("Username is required.")
+        elif re.match(r"^[0-9]", u):
+            st.error("Username cannot begin with numbers.")
+        elif not re.fullmatch(r"[a-z0-9._]{3,30}", u):
+            st.error("Username must be 3–30 chars and can use a-z 0-9 . _")
+        else:
+            ok, msg = create_user(email, phone, password)
+            if not ok:
+                st.error(msg)
+            else:
+                # set username into profiles
+                def _set_username():
+                    c = conn()
+                    cur = c.cursor()
+                    cur.execute("BEGIN IMMEDIATE;")
+                    row = cur.execute("SELECT id FROM users WHERE email=?", (normalize_email(email),)).fetchone()
+                    if not row:
+                        cur.execute("ROLLBACK;")
+                        c.close()
+                        return False, "Account created but cannot load user."
+                    uid = int(row["id"])
+                    try:
+                        cur.execute(
+                            "UPDATE profiles SET username=?, updated_at=? WHERE user_id=?",
+                            (u, now_iso(), uid)
+                        )
+                        cur.execute("COMMIT;")
+                        c.close()
+                        return True, "Account created."
+                    except sqlite3.IntegrityError:
+                        cur.execute("ROLLBACK;")
+                        c.close()
+                        return False, "Username already taken."
+
+                ok2, msg2 = with_retry(_set_username)
+                if ok2:
+                    st.success("Account created. Please login.")
+                    nav_to("login")
+                else:
+                    st.error(msg2)
+
+    _auth_shell_end()
+
+
+def page_reset():
+    _auth_shell_start()
+
+    st.markdown("<div class='rb-auth-top'>", unsafe_allow_html=True)
+    _render_auth_logo()
+    st.markdown("<h1 class='rb-auth-title'>Reset password</h1>", unsafe_allow_html=True)
+    st.markdown("<div class='rb-auth-sub'>Set a new password in seconds</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    with st.form("reset_form_main", clear_on_submit=False):
+        email = st.text_input("Email", placeholder="name@email.com")
+        new_password = st.text_input("New password", type="password", placeholder="Min 6 characters")
+        go = st.form_submit_button("Reset", type="primary", use_container_width=True)
+
+    st.markdown("<div class='rb-auth-links'>", unsafe_allow_html=True)
+    st.markdown(f"<a href='{build_url(r='login', t=qp_get('t',''))}'>Back to login</a>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if go:
+        ok, msg = reset_password(email, new_password)
+        if ok:
+            st.success(msg)
+            nav_to("login")
+        else:
+            st.error(msg)
+
+    _auth_shell_end()
+
+
+# -----------------------------
+# MAIN ROUTING (REPLACE YOUR main() WITH THIS)
+# -----------------------------
+def main():
+    inject_style()
+    init_db()
+
+    st.session_state.setdefault("route", "login")
+    st.session_state.setdefault("page", "Feed")
+
+    url_r = qp_get("r", "")
+    url_p = qp_get("p", "")
+
+    if url_r:
+        st.session_state["route"] = url_r
+    if url_p:
+        st.session_state["page"] = url_p
+
+    # Auto-login from token
+    if not st.session_state.get("user_id"):
+        tok = qp_get("t", "")
+        if tok:
+            uid = load_session_from_token(tok)
+            if uid:
+                st.session_state["user_id"] = uid
+                st.session_state["session_token"] = tok
+                st.session_state["route"] = "app"
+
+    uid = st.session_state.get("user_id")
+
+    if not uid:
+        r = st.session_state.get("route", "login")
+        if r not in ["login", "register", "reset"]:
+            r = "login"
+        qp_set(r=r, t=qp_get("t", ""))
+
+        if r == "register":
+            page_register()
+        elif r == "reset":
+            page_reset()
+        else:
+            page_login()
         return
 
-    def _init():
-        c = conn()
-        cur = c.cursor()
-        cur.execute("BEGIN IMMEDIATE;")
+    # Logged in: keep URL synced
+    t = st.session_state.get("session_token") or qp_get("t", "")
+    p = st.session_state.get("page", "Feed") or "Feed"
+    qp_set(t=t, r="app", p=p)
 
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            phone TEXT,
-            password_hash TEXT NOT NULL
-        )
-        """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            token TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            created_at TEXT NOT NULL,
-            last_seen TEXT NOT NULL,
-            expires_at TEXT NOT NULL
-        )
-        """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS profiles (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            display_name TEXT,
-            bio TEXT,
-            updated_at TEXT NOT NULL
-        )
-        """)
-
-        cur.execute("COMMIT;")
-        c.close()
-
-    with_retry(_init)
-    st.session_state["_db_inited"] = True
+    st.session_state["route"] = "app"
+    app_router(int(uid))
 
 
-# =============================
-# AUTH
-# =============================
-def ensure_profile_for_user(user_id: int, email: str):
-    base = (email.split("@")[0] if "@" in email else "user").lower()
-    base = re.sub(r"[^a-z0-9._]", "", base)[:30] or "user"
+# === END DROP-IN REPLACEMENT ===
+Copy code
+Python
+# === IMPORTANT: FIX YOUR LOGO "WHITE LINE" + PHONE LAYOUT IN NAVBAR ===
+# Replace ONLY your render_logo() with this (keeps everything else).
 
-    def _do():
-        c = conn()
-        cur = c.cursor()
-        cur.execute("BEGIN IMMEDIATE;")
-        row = cur.execute("SELECT user_id FROM profiles WHERE user_id=?", (user_id,)).fetchone()
-        if row:
-            cur.execute("COMMIT;")
-            c.close()
-            return
-
-        suffix = 0
-        while True:
-            u = base if suffix == 0 else f"{base}{suffix}"
-            try:
-                cur.execute("""
-                    INSERT INTO profiles (user_id, username, display_name, bio, updated_at)
-                    VALUES (?,?,?,?,?)
-                """, (user_id, u, "", "", now_iso()))
-                break
-            except sqlite3.IntegrityError:
-                suffix += 1
-                if suffix > 9999:
-                    break
-
-        cur.execute("COMMIT;")
-        c.close()
-
-    with_retry(_do)
-
-
-def create_user(email: str, phone: str, password: str) -> (bool, str):
-    email = normalize_email(email)
-    phone = normalize_phone(phone)
-    password = (password or "").strip()
-
-    if not email or "@" not in email:
-        return False, "Enter a valid email."
-    if len(password) < 6:
-        return False, "Password must be at least 6 characters."
-
-    def _do():
-        c = conn()
-        cur = c.cursor()
-        cur.execute("BEGIN IMMEDIATE;")
-        try:
-            cur.execute(
-                "INSERT INTO users (created_at, email, phone, password_hash) VALUES (?,?,?,?)",
-                (now_iso(), email, phone, sha256(password)),
-            )
-        except sqlite3.IntegrityError:
-            cur.execute("ROLLBACK;")
-            c.close()
-            return False, "Email already exists."
-        uid = cur.lastrowid
-        cur.execute("COMMIT;")
-        c.close()
-        ensure_profile_for_user(uid, email)
-        return True, "Account created."
-
-    return with_retry(_do)
-
-
-def authenticate(email: str, password: str) -> Optional[int]:
-    email = normalize_email(email)
-    password = (password or "").strip()
-
-    def _do():
-        c = conn()
-        row = c.execute("SELECT id, email, password_hash FROM users WHERE email=?", (email,)).fetchone()
-        c.close()
-        return dict(row) if row else None
-
-    u = with_retry(_do)
-    if not u:
-        return None
-    if u["password_hash"] != sha256(password):
-        return None
-
-    uid = int(u["id"])
-    ensure_profile_for_user(uid, u["email"])
-    return uid
-
-
-def reset_password(email: str, new_password: str) -> (bool, str):
-    email = normalize_email(email)
-    new_password = (new_password or "").strip()
-
-    if not email or "@" not in email:
-        return False, "Enter a valid email."
-    if len(new_password) < 6:
-        return False, "New password must be at least 6 characters."
-
-    def _do():
-        c = conn()
-        cur = c.cursor()
-        cur.execute("BEGIN IMMEDIATE;")
-        cur.execute("UPDATE users SET password_hash=? WHERE email=?", (sha256(new_password), email))
-        changed = cur.rowcount
-        cur.execute("COMMIT;")
-        c.close()
-        return changed
-
-    changed = with_retry(_do)
-    return (True, "Password reset.") if changed else (False, "Email not found.")
-
-
-# =============================
-# SESSIONS
-# =============================
-def create_session(user_id: int) -> str:
-    token = uuid.uuid4().hex + uuid.uuid4().hex
-    expires = (now_berlin_dt() + timedelta(days=SESSION_DAYS)).replace(microsecond=0).isoformat()
-
-    def _do():
-        c = conn()
-        cur = c.cursor()
-        cur.execute("BEGIN IMMEDIATE;")
-        cur.execute("""
-            INSERT INTO sessions (token, user_id, created_at, last_seen, expires_at)
-            VALUES (?,?,?,?,?)
-        """, (token, user_id, now_iso(), now_iso(), expires))
-        cur.execute("COMMIT;")
-        c.close()
-
-    with_retry(_do)
-    return token
-
-
-def load_session_from_token(token: str) -> Optional[int]:
-    token = (token or "").strip()
-    if not token:
-        return None
-
-    def _do():
-        c = conn()
-        row = c.execute("SELECT user_id, expires_at FROM sessions WHERE token=?", (token,)).fetchone()
-        c.close()
-        return dict(row) if row else None
-
-    r = with_retry(_do)
-    if not r:
-        return None
-
-    try:
-        exp = datetime.fromisoformat(r["expires_at"])
-    except Exception:
-        return None
-
-    # exp may be naive; compare naive with naive or aware with aware
-    now = now_berlin_dt().replace(microsecond=0)
-    if exp.tzinfo is None and now.tzinfo is not None:
-        now = now.replace(tzinfo=None)
-
-    if exp < now:
-        return None
-
-    def _touch():
-        c = conn()
+def render_logo():
+    logo = asset_path("logo.png")
+  
         cur = c.cursor()
         cur.execute("BEGIN IMMEDIATE;")
         cur.execute("UPDATE sessions SET last_seen=? WHERE token=?", (now_iso(), token))
