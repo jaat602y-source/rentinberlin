@@ -1,31 +1,6 @@
-
 # main.py
 # Run: streamlit run main.py
-#
-# RentinBerlin — ONE-FILE Streamlit app (Berlin timezone + modern UI + SQLite)
-#
-# Fixes/Upgrades included:
-# ✅ Persistent login via URL token (?t=...) so refresh/back doesn't log out
-# ✅ Germany time only (Europe/Berlin) everywhere
-# ✅ Building number OPTIONAL everywhere (DB + forms + address)
-# ✅ Professional included-features pills (one color style)
-# ✅ Media viewer: images/videos slider (Prev/Next + optional autoplay if autorefresh exists)
-# ✅ Messages/Requests work + "other_id" SQL bug fixed
-# ✅ Profile shows Posts + Followers + Following + Saved (liked posts)
-# ✅ Support page includes rating + comment submission + contact + suggestions
-# ✅ Report flag available in Profile, Messages, Requests, PostDetails
-# ✅ Logo in tab + navbar bigger (assets/logo.png)
-# ✅ FIX: Duplicate widget keys for cards across tabs/pages by namespacing with ctx
-#
-# Optional assets:
-#   assets/logo.png
-#   assets/avatar_unknown.png
-#   assets/avatar_male.png
-#   assets/avatar_female.png
-#
-# Storage:
-#   uploads/ (user uploads)
-#   berlinrent_social.db (SQLite)
+# RentinBerlin — ONE-FILE Streamlit app (Website-like URL routing + Mobile-first auth + SQLite)
 
 import os
 import re
@@ -34,7 +9,655 @@ import uuid
 import sqlite3
 import hashlib
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
+from urllib.parse import urlencode
+
+import streamlit as st
+
+# =============================
+# CONFIG
+# =============================
+APP_NAME = "RentinBerlin"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "berlinrent_social.db")
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+os.makedirs(ASSETS_DIR, exist_ok=True)
+
+SESSION_DAYS = 30
+REGISTRATION_ENABLED = True
+
+# Berlin timezone
+try:
+    from zoneinfo import ZoneInfo
+    BERLIN_TZ = ZoneInfo("Europe/Berlin")
+except Exception:
+    BERLIN_TZ = None
+
+# favicon
+favicon = "🏠"
+try:
+    from PIL import Image
+    fav_path = os.path.join(ASSETS_DIR, "logo.png")
+    if os.path.exists(fav_path):
+        favicon = Image.open(fav_path)
+except Exception:
+    pass
+
+st.set_page_config(page_title=APP_NAME, page_icon=favicon, layout="wide")
+
+
+# =============================
+# TIME / UTIL
+# =============================
+def now_berlin_dt() -> datetime:
+    return datetime.now(BERLIN_TZ) if BERLIN_TZ else datetime.now()
+
+
+def now_iso() -> str:
+    return now_berlin_dt().replace(microsecond=0).isoformat()
+
+
+def sha256(s: str) -> str:
+    return hashlib.sha256((s or "").encode("utf-8")).hexdigest()
+
+
+def normalize_email(e: str) -> str:
+    return (e or "").strip().lower()
+
+
+def normalize_phone(p: str) -> str:
+    p = (p or "").strip()
+    p = re.sub(r"[^\d+]", "", p)
+    return p[:25]
+
+
+def asset_path(name: str) -> str:
+    p = os.path.join(ASSETS_DIR, name)
+    return p if os.path.exists(p) else ""
+
+
+# =============================
+# QUERY PARAMS = WEBSITE ROUTING
+# =============================
+def qp_get(key: str, default: str = "") -> str:
+    try:
+        v = st.query_params.get(key)
+        if isinstance(v, list):
+            return v[0] if v else default
+        return v if v is not None else default
+    except Exception:
+        try:
+            qp = st.experimental_get_query_params()
+            return (qp.get(key, [default])[0]) if qp else default
+        except Exception:
+            return default
+
+
+def qp_set(**kwargs):
+    clean = {k: v for k, v in kwargs.items() if v is not None and str(v) != ""}
+    try:
+        st.query_params.clear()
+        for k, v in clean.items():
+            st.query_params[k] = v
+    except Exception:
+        try:
+            st.experimental_set_query_params(**clean)
+        except Exception:
+            pass
+
+
+def build_url(**kwargs) -> str:
+    clean = {k: v for k, v in kwargs.items() if v is not None and str(v) != ""}
+    qs = urlencode(clean, doseq=False)
+    return f"?{qs}" if qs else ""
+
+
+def nav_to(route: str, page: str = "", token: str = ""):
+    t = token or st.session_state.get("session_token", "") or qp_get("t", "")
+    if route in ["login", "register", "reset"]:
+        qp_set(t=t, r=route)
+        st.session_state["route"] = route
+        st.session_state["page"] = ""
+    else:
+        qp_set(t=t, r="app", p=page or "Feed")
+        st.session_state["route"] = "app"
+        st.session_state["page"] = page or "Feed"
+    st.rerun()
+
+
+# =============================
+# DB
+# =============================
+def conn():
+    c = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL;")
+    c.execute("PRAGMA synchronous=NORMAL;")
+    c.execute("PRAGMA busy_timeout=8000;")
+    return c
+
+
+def with_retry(fn, tries: int = 12, base_sleep: float = 0.12):
+    last = None
+    for i in range(tries):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            last = e
+            msg = str(e).lower()
+            if "locked" in msg or "busy" in msg:
+                time.sleep(base_sleep * (i + 1))
+                continue
+            raise
+    raise last
+
+
+def init_db():
+    if st.session_state.get("_db_inited"):
+        return
+
+    def _init():
+        c = conn()
+        cur = c.cursor()
+        cur.execute("BEGIN IMMEDIATE;")
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            phone TEXT,
+            password_hash TEXT NOT NULL
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS profiles (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            display_name TEXT,
+            bio TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """)
+
+        cur.execute("COMMIT;")
+        c.close()
+
+    with_retry(_init)
+    st.session_state["_db_inited"] = True
+
+
+# =============================
+# AUTH
+# =============================
+def ensure_profile_for_user(user_id: int, email: str):
+    base = (email.split("@")[0] if "@" in email else "user").lower()
+    base = re.sub(r"[^a-z0-9._]", "", base)[:30] or "user"
+
+    def _do():
+        c = conn()
+        cur = c.cursor()
+        cur.execute("BEGIN IMMEDIATE;")
+        row = cur.execute("SELECT user_id FROM profiles WHERE user_id=?", (user_id,)).fetchone()
+        if row:
+            cur.execute("COMMIT;")
+            c.close()
+            return
+
+        suffix = 0
+        while True:
+            u = base if suffix == 0 else f"{base}{suffix}"
+            try:
+                cur.execute("""
+                    INSERT INTO profiles (user_id, username, display_name, bio, updated_at)
+                    VALUES (?,?,?,?,?)
+                """, (user_id, u, "", "", now_iso()))
+                break
+            except sqlite3.IntegrityError:
+                suffix += 1
+                if suffix > 9999:
+                    break
+
+        cur.execute("COMMIT;")
+        c.close()
+
+    with_retry(_do)
+
+
+def create_user(email: str, phone: str, password: str) -> (bool, str):
+    email = normalize_email(email)
+    phone = normalize_phone(phone)
+    password = (password or "").strip()
+
+    if not email or "@" not in email:
+        return False, "Enter a valid email."
+    if len(password) < 6:
+        return False, "Password must be at least 6 characters."
+
+    def _do():
+        c = conn()
+        cur = c.cursor()
+        cur.execute("BEGIN IMMEDIATE;")
+        try:
+            cur.execute(
+                "INSERT INTO users (created_at, email, phone, password_hash) VALUES (?,?,?,?)",
+                (now_iso(), email, phone, sha256(password)),
+            )
+        except sqlite3.IntegrityError:
+            cur.execute("ROLLBACK;")
+            c.close()
+            return False, "Email already exists."
+        uid = cur.lastrowid
+        cur.execute("COMMIT;")
+        c.close()
+        ensure_profile_for_user(uid, email)
+        return True, "Account created."
+
+    return with_retry(_do)
+
+
+def authenticate(email: str, password: str) -> Optional[int]:
+    email = normalize_email(email)
+    password = (password or "").strip()
+
+    def _do():
+        c = conn()
+        row = c.execute("SELECT id, email, password_hash FROM users WHERE email=?", (email,)).fetchone()
+        c.close()
+        return dict(row) if row else None
+
+    u = with_retry(_do)
+    if not u:
+        return None
+    if u["password_hash"] != sha256(password):
+        return None
+
+    uid = int(u["id"])
+    ensure_profile_for_user(uid, u["email"])
+    return uid
+
+
+def reset_password(email: str, new_password: str) -> (bool, str):
+    email = normalize_email(email)
+    new_password = (new_password or "").strip()
+
+    if not email or "@" not in email:
+        return False, "Enter a valid email."
+    if len(new_password) < 6:
+        return False, "New password must be at least 6 characters."
+
+    def _do():
+        c = conn()
+        cur = c.cursor()
+        cur.execute("BEGIN IMMEDIATE;")
+        cur.execute("UPDATE users SET password_hash=? WHERE email=?", (sha256(new_password), email))
+        changed = cur.rowcount
+        cur.execute("COMMIT;")
+        c.close()
+        return changed
+
+    changed = with_retry(_do)
+    return (True, "Password reset.") if changed else (False, "Email not found.")
+
+
+# =============================
+# SESSIONS
+# =============================
+def create_session(user_id: int) -> str:
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    expires = (now_berlin_dt() + timedelta(days=SESSION_DAYS)).replace(microsecond=0).isoformat()
+
+    def _do():
+        c = conn()
+        cur = c.cursor()
+        cur.execute("BEGIN IMMEDIATE;")
+        cur.execute("""
+            INSERT INTO sessions (token, user_id, created_at, last_seen, expires_at)
+            VALUES (?,?,?,?,?)
+        """, (token, user_id, now_iso(), now_iso(), expires))
+        cur.execute("COMMIT;")
+        c.close()
+
+    with_retry(_do)
+    return token
+
+
+def load_session_from_token(token: str) -> Optional[int]:
+    token = (token or "").strip()
+    if not token:
+        return None
+
+    def _do():
+        c = conn()
+        row = c.execute("SELECT user_id, expires_at FROM sessions WHERE token=?", (token,)).fetchone()
+        c.close()
+        return dict(row) if row else None
+
+    r = with_retry(_do)
+    if not r:
+        return None
+
+    try:
+        exp = datetime.fromisoformat(r["expires_at"])
+    except Exception:
+        return None
+
+    # exp may be naive; compare naive with naive or aware with aware
+    now = now_berlin_dt().replace(microsecond=0)
+    if exp.tzinfo is None and now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+
+    if exp < now:
+        return None
+
+    def _touch():
+        c = conn()
+        cur = c.cursor()
+        cur.execute("BEGIN IMMEDIATE;")
+        cur.execute("UPDATE sessions SET last_seen=? WHERE token=?", (now_iso(), token))
+        cur.execute("COMMIT;")
+        c.close()
+
+    with_retry(_touch)
+    return int(r["user_id"])
+
+
+def delete_session(token: str):
+    token = (token or "").strip()
+    if not token:
+        return
+
+    def _do():
+        c = conn()
+        cur = c.cursor()
+        cur.execute("BEGIN IMMEDIATE;")
+        cur.execute("DELETE FROM sessions WHERE token=?", (token,))
+        cur.execute("COMMIT;")
+        c.close()
+
+    with_retry(_do)
+
+
+def logout():
+    tok = st.session_state.get("session_token") or qp_get("t", "")
+    if tok:
+        delete_session(tok)
+    for k in list(st.session_state.keys()):
+        if k not in ["_db_inited"]:
+            st.session_state.pop(k, None)
+    qp_set(r="login")
+    st.rerun()
+
+
+def get_profile(uid: int) -> Dict[str, Any]:
+    def _do():
+        c = conn()
+        row = c.execute("""
+            SELECT u.id, u.email, u.phone,
+                   COALESCE(p.username,'') AS username,
+                   COALESCE(p.display_name,'') AS display_name,
+                   COALESCE(p.bio,'') AS bio
+            FROM users u
+            LEFT JOIN profiles p ON p.user_id=u.id
+            WHERE u.id=?
+        """, (uid,)).fetchone()
+        c.close()
+        return dict(row) if row else {}
+
+    return with_retry(_do)
+
+
+# =============================
+# UI STYLE (MOBILE-FIRST)
+# =============================
+def inject_style():
+    st.markdown("""
+    <style>
+      #MainMenu {visibility:hidden;}
+      footer {visibility:hidden;}
+      header {visibility:hidden;}
+
+      .stApp { background: #f6f8fb; }
+      section.main > div.block-container{
+        max-width: 1180px;
+        padding-top: 0.7rem;
+        padding-bottom: 4.5rem;
+      }
+      @media (max-width: 768px){
+        section.main > div.block-container{
+          padding-left: 0.9rem;
+          padding-right: 0.9rem;
+        }
+      }
+
+      /* NAV LINKS */
+      .rb-navwrap{
+        background:#fff;
+        border:1px solid #eef2f7;
+        border-radius:18px;
+        box-shadow: 0 18px 45px rgba(16,24,40,0.06);
+        padding: 10px 14px;
+      }
+      .rb-navrow{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+      .rb-logo{ display:flex; align-items:center; gap:10px; font-weight:950; font-size:18px; color:#0f172a; }
+      .rb-navlinks{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+      .rb-navlinks a{
+        text-decoration:none !important;
+        border-radius:14px;
+        border:1px solid rgba(226,232,240,1);
+        background:#fff;
+        color:#0f172a;
+        padding:10px 14px;
+        font-weight:900;
+        display:inline-flex;
+        align-items:center;
+        gap:8px;
+      }
+      .rb-navlinks a:hover{ border-color: rgba(203,213,225,1); background:#fbfdff; }
+      .rb-navlinks a.rb-active{
+        background:#ff7a1a;
+        border-color:#ff7a1a;
+        color:#fff;
+        box-shadow: 0 10px 30px rgba(255, 122, 26, 0.20);
+      }
+
+      /* AUTH: full bg + centered card */
+      .rb-auth-bg{
+        position: fixed; inset: 0; z-index: 0; pointer-events:none;
+        background:
+          radial-gradient(900px 520px at 15% 20%, rgba(0, 229, 255, 0.16), transparent 60%),
+          radial-gradient(800px 480px at 85% 18%, rgba(255, 122, 26, 0.18), transparent 62%),
+          radial-gradient(900px 720px at 55% 90%, rgba(168, 85, 247, 0.16), transparent 64%),
+          linear-gradient(135deg, #05060b 0%, #070a14 45%, #04040a 100%);
+      }
+      section.main{ position: relative; z-index: 2; }
+
+      .rb-auth-shell{
+        max-width: 440px;
+        margin: 0 auto;
+        padding-top: 6vh;
+        padding-bottom: 6vh;
+      }
+      @media (max-width: 480px){
+        .rb-auth-shell{ max-width: 100%; padding-top: 3vh; }
+      }
+
+      .rb-auth-card{
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(255,255,255,0.14);
+        border-radius: 22px;
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        box-shadow: 0 30px 90px rgba(0,0,0,0.40);
+        padding: 18px 16px 14px 16px;
+      }
+
+      .rb-auth-top{
+        display:flex; flex-direction:column; align-items:center; text-align:center; gap:10px;
+        margin-bottom: 10px;
+      }
+      .rb-auth-logoimg{ width:64px; height:64px; object-fit:contain; border-radius:18px; }
+      .rb-auth-title{ font-weight: 950; font-size: 30px; color: rgba(255,255,255,0.95); margin: 0; }
+      .rb-auth-sub{ color: rgba(255,255,255,0.75); font-size: 14px; margin-top: 4px; }
+
+      /* Inputs on dark */
+      .rb-auth-card .stTextInput input{
+        height: 46px !important;
+        border-radius: 14px !important;
+        border: 1px solid rgba(255,255,255,0.16) !important;
+        background: rgba(255,255,255,0.08) !important;
+        color: rgba(255,255,255,0.92) !important;
+      }
+      .rb-auth-card label{ color: rgba(255,255,255,0.86) !important; font-weight: 900 !important; }
+
+      /* Buttons */
+      .stButton>button{
+        border-radius: 14px !important;
+        border: 1px solid rgba(226,232,240,1) !important;
+        background: #ffffff !important;
+        color: #0f172a !important;
+        padding: 0.60rem 0.95rem !important;
+        font-weight: 900 !important;
+      }
+      .stButton>button[kind="primary"]{
+        background: #ff7a1a !important;
+        border-color: #ff7a1a !important;
+        color: white !important;
+        box-shadow: 0 10px 30px rgba(255, 122, 26, 0.20) !important;
+      }
+
+      /* Remove “white line” around images */
+      img{ outline:none !important; border:none !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def render_brand_logo(size: int = 56):
+    logo = asset_path("logo.png")
+    if logo:
+        st.image(logo, width=size)
+    else:
+        st.markdown(f"<div style='font-size:{size-10}px; line-height:1;'>🏠</div>", unsafe_allow_html=True)
+
+
+def render_navbar(current_page: str, uid: int):
+    token = st.session_state.get("session_token") or qp_get("t", "")
+    def link(label: str, page: str):
+        href = build_url(t=token, r="app", p=page)
+        active = "rb-active" if current_page == page else ""
+        return f"<a class='{active}' href='{href}'>{label}</a>"
+
+    st.markdown("<div class='rb-navwrap'><div class='rb-navrow'>", unsafe_allow_html=True)
+
+    # left: logo + name
+    left = st.container()
+    with left:
+        cols = st.columns([0.22, 1.78], vertical_alignment="center")
+        with cols[0]:
+            logo = asset_path("logo.png")
+            if logo:
+                st.image(logo, width=40)
+            else:
+                st.write("🏠")
+        with cols[1]:
+            st.markdown("<div class='rb-logo'>RentinBerlin</div>", unsafe_allow_html=True)
+
+    # right: links
+    st.markdown(
+        "<div class='rb-navlinks'>"
+        + link("Home", "Feed")
+        + link("Profile", "Profile")
+        + link("Logout", "Logout")
+        + "</div>",
+        unsafe_allow_html=True
+    )
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+# =============================
+# PAGES (AUTH)
+# =============================
+def auth_shell_start():
+    st.markdown("<div class='rb-auth-bg'></div>", unsafe_allow_html=True)
+    st.markdown("<div class='rb-auth-shell'>", unsafe_allow_html=True)
+    st.markdown("<div class='rb-auth-card'>", unsafe_allow_html=True)
+
+
+def auth_shell_end():
+    st.markdown("</div></div>", unsafe_allow_html=True)
+
+
+def page_login():
+    auth_shell_start()
+
+    logo = asset_path("logo.png")
+    if logo:
+        st.markdown(f"""
+        <div class="rb-auth-top">
+          <img class="rb-auth-logoimg" src="app/static/{os.path.basename(logo)}" />
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Safe logo render (works everywhere)
+    st.markdown("<div class='rb-auth-top'>", unsafe_allow_html=True)
+    render_brand_logo(64)
+    st.markdown(f"<h1 class='rb-auth-title'>Sign in</h1>", unsafe_allow_html=True)
+    st.markdown("<div class='rb-auth-sub'>Welcome back to RentinBerlin</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    with st.form("login_form", clear_on_submit=False):
+        email = st.text_input("Email", placeholder="name@email.com")
+        password = st.text_input("Password", type="password", placeholder="••••••••")
+        submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
+
+    row = st.columns(2)
+    if row[0].button("Create account", use_container_width=True, disabled=(not REGISTRATION_ENABLED)):
+        nav_to("register")
+    if row[1].button("Reset password", use_container_width=True):
+        nav_to("reset")
+
+    st.caption("Password must be at least 6 characters.")
+
+    if submitted:
+        uid = authenticate(email, password)
+        if not uid:
+            st.error("Wrong email or password.")
+        else:
+            token = create_session(uid)
+            st.session_state["user_id"] = uid
+            st.session_state["session_token"] = token
+            nav_to("app", page="Feed", token=token)
+
+    auth_shell_end()
+
+
+def page_register():
+    auth_shell_start()
+
+    st.markdown("<div class='rb-auth-top'>", unsafe_allow_html=True)
+    render_brand_logo(64)
+    st.markdown(f"<h1 class='rb-auth-title'>Create account</h1>", unsafe_allow_html=True)
+    st.markdown("<div class='rb-auth-sub'>Start posting and messaging in Berlin</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    with st.form("register_form", clear_on_submit=False):
+        email = st.text_input("Email", placeholder="name@email.com")
+        phone = st.text_input("Phone (optional)", placeholder="+49 …")
+        password = st.text_input("Password", type="password", placeholder="min 6 characters")
+        submitted = st.form_submit_button("Create account", type="primary", use_container_width=True)
+
+    st.cafrom typing import Optional, Dict, Any, List, Tuple
 from urllib.parse import quote_plus
 
 import streamlit as st
