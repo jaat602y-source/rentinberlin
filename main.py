@@ -2,19 +2,18 @@
 # Run: streamlit run main.py
 #
 # ONE-FILE Streamlit app:
-# - Professional centered Login / Signup / Reset
+# - Professional centered Login / Signup / Reset (mobile friendly)
 # - Email+Password auth (SQLite)
 # - Persistent login via URL token (?t=...)
-# - Optional REAL Google OAuth (Authlib + secrets)
-# - Apple button UI (real Apple OAuth needs Apple Developer keys)
+# - REAL Google OAuth (Authlib + secrets)
+# - Apple button UI (real Apple OAuth needs Apple Developer Program keys)
 #
-# Folder (optional):
+# Optional folder:
 #   assets/logo.png
 
 import os
 import re
 import uuid
-import time
 import base64
 import sqlite3
 import hashlib
@@ -22,9 +21,11 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 # Optional: REAL Google OAuth
 try:
+    import requests
     from authlib.integrations.requests_client import OAuth2Session
     AUTHLIB_OK = True
 except Exception:
@@ -42,6 +43,26 @@ os.makedirs(ASSETS_DIR, exist_ok=True)
 
 SESSION_DAYS = 30
 REGISTRATION_ENABLED = True
+
+# Google endpoints
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+
+
+# =============================
+# PAGE CONFIG
+# =============================
+logo_path = os.path.join(ASSETS_DIR, "logo.png")
+page_icon = "🏠"
+if os.path.exists(logo_path):
+    page_icon = logo_path
+
+st.set_page_config(
+    page_title=APP_NAME,
+    page_icon=page_icon,
+    layout="centered",
+)
 
 
 # =============================
@@ -81,6 +102,23 @@ def _img_to_b64(path: str) -> str:
         return base64.b64encode(f.read()).decode("utf-8")
 
 
+def html_escape(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def json_escape(s: str) -> str:
+    s = (s or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f"\"{s}\""
+
+
+def redirect_js(url: str):
+    # Works on mobile + Streamlit cloud
+    components.html(
+        f"<script>window.location.replace({json_escape(url)});</script>",
+        height=0,
+    )
+
+
 # =============================
 # QUERY TOKEN
 # =============================
@@ -108,7 +146,7 @@ def set_query_token(token: str):
         pass
 
 
-def clear_query_token():
+def clear_all_query_params():
     try:
         st.query_params.clear()
         return
@@ -118,6 +156,22 @@ def clear_query_token():
         st.experimental_set_query_params()
     except Exception:
         pass
+
+
+def get_query_param(name: str) -> str:
+    try:
+        v = st.query_params.get(name, "")
+        return v or ""
+    except Exception:
+        pass
+    try:
+        qp = st.experimental_get_query_params() or {}
+        v = qp.get(name, "")
+        if isinstance(v, list):
+            return v[0] if v else ""
+        return v or ""
+    except Exception:
+        return ""
 
 
 # =============================
@@ -176,6 +230,7 @@ def init_db():
 def ensure_profile_for_user(user_id: int, email: str):
     email = normalize_email(email)
     base_username = sanitize_username(email.split("@")[0]) or "user"
+
     c = conn()
     cur = c.cursor()
     row = cur.execute("SELECT user_id FROM profiles WHERE user_id=?", (user_id,)).fetchone()
@@ -339,110 +394,138 @@ def logout():
     tok = st.session_state.get("session_token") or get_query_token()
     if tok:
         delete_session(tok)
-    clear_query_token()
+    clear_all_query_params()
     for k in list(st.session_state.keys()):
-        if k in ["user_id", "route", "session_token"]:
+        if k in ["user_id", "route", "session_token", "google_state"]:
             st.session_state.pop(k, None)
 
 
 # =============================
-# OPTIONAL: REAL GOOGLE OAUTH
+# REAL GOOGLE OAUTH (Authlib)
 # =============================
-def google_oauth_is_configured() -> bool:
+def google_configured() -> bool:
     if not AUTHLIB_OK:
         return False
     try:
         _ = st.secrets["GOOGLE_CLIENT_ID"]
         _ = st.secrets["GOOGLE_CLIENT_SECRET"]
-        _ = st.secrets["GOOGLE_REDIRECT_URI"]
+        _ = st.secrets["APP_BASE_URL"]
         return True
     except Exception:
         return False
 
 
-def google_oauth_login_button(label: str = "Continue with Google"):
-    # If not configured, show a button but explain
-    if not google_oauth_is_configured():
-        if st.button(label, use_container_width=True, key="google_btn_not_ready"):
-            st.info("Google login is not configured yet. Add Authlib + Google secrets in Streamlit.")
-        return
+def google_redirect_uri() -> str:
+    # must match your Google console redirect
+    base = (st.secrets.get("APP_BASE_URL") or "").rstrip("/")
+    return f"{base}/"
 
-    client_id = st.secrets["GOOGLE_CLIENT_ID"]
-    client_secret = st.secrets["GOOGLE_CLIENT_SECRET"]
-    redirect_uri = st.secrets["GOOGLE_REDIRECT_URI"]
+
+def google_start():
+    if not google_configured():
+        st.info("Google login not configured. Add authlib + secrets.")
+        return
 
     oauth = OAuth2Session(
-        client_id=client_id,
+        client_id=st.secrets["GOOGLE_CLIENT_ID"],
+        client_secret=st.secrets["GOOGLE_CLIENT_SECRET"],
         scope="openid email profile",
-        redirect_uri=redirect_uri,
+        redirect_uri=google_redirect_uri(),
     )
 
-    # Callback handler
-    qp = {}
-    try:
-        qp = dict(st.query_params)
-    except Exception:
-        qp = st.experimental_get_query_params() or {}
+    state = uuid.uuid4().hex
+    st.session_state["google_state"] = state
 
-    code = qp.get("code", "")
-    if isinstance(code, list):
-        code = code[0] if code else ""
+    auth_url, _ = oauth.create_authorization_url(
+        GOOGLE_AUTH_URL,
+        state=state,
+        prompt="select_account",
+        include_granted_scopes="true",
+        access_type="online",
+    )
+    redirect_js(auth_url)
 
-    if code:
-        try:
-            oauth.fetch_token(
-                "https://oauth2.googleapis.com/token",
-                code=code,
-                client_secret=client_secret,
-            )
-            userinfo = oauth.get("https://openidconnect.googleapis.com/v1/userinfo").json()
-            email = normalize_email(userinfo.get("email", ""))
 
-            if not email:
-                st.error("Google login failed: no email returned.")
-                return
-
-            # Get or create local user
-            c = conn()
-            row = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
-            if row:
-                uid = int(row["id"])
-                c.close()
-            else:
-                # Create with random password (user can reset later)
-                pw = uuid.uuid4().hex[:10] + "A!"
-                cur = c.cursor()
-                cur.execute(
-                    "INSERT INTO users (created_at, email, phone, password_hash) VALUES (?,?,?,?)",
-                    (now_iso(), email, "", sha256(pw))
-                )
-                c.commit()
-                uid = int(cur.lastrowid)
-                c.close()
-                ensure_profile_for_user(uid, email)
-
-            # Clean params
-            clear_query_token()  # removes all; then we set our session token again below
-
-            # Login
-            token = create_session(uid)
-            st.session_state["user_id"] = uid
-            st.session_state["session_token"] = token
-            set_query_token(token)
-            st.session_state["route"] = "app"
-            st.rerun()
-        except Exception as e:
-            st.error(f"Google login failed: {e}")
+def google_finish_if_callback():
+    """
+    If URL has ?code=...&state=..., exchange token, fetch user info,
+    create local user, create session, then clean URL and go to app.
+    """
+    if not google_configured():
         return
 
-    # Start OAuth
-    auth_url, _state = oauth.create_authorization_url(
-        "https://accounts.google.com/o/oauth2/v2/auth",
-        access_type="offline",
-        prompt="select_account",
-    )
-    if st.button(label, use_container_width=True, key="google_btn_start"):
-        st.markdown(f"<meta http-equiv='refresh' content='0; url={auth_url}'>", unsafe_allow_html=True)
+    code = get_query_param("code")
+    state = get_query_param("state")
+
+    if not code:
+        return
+
+    expected = st.session_state.get("google_state")
+    if expected and state and state != expected:
+        st.error("Google login security check failed (state mismatch). Try again.")
+        return
+
+    try:
+        oauth = OAuth2Session(
+            client_id=st.secrets["GOOGLE_CLIENT_ID"],
+            client_secret=st.secrets["GOOGLE_CLIENT_SECRET"],
+            scope="openid email profile",
+            redirect_uri=google_redirect_uri(),
+        )
+        token = oauth.fetch_token(
+            GOOGLE_TOKEN_URL,
+            code=code,
+            grant_type="authorization_code",
+        )
+
+        r = requests.get(
+            GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {token['access_token']}"},
+            timeout=20,
+        )
+        if r.status_code != 200:
+            st.error("Google login failed (userinfo).")
+            return
+
+        info = r.json()
+        email = normalize_email(info.get("email", ""))
+        if not email:
+            st.error("Google login failed: no email returned.")
+            return
+
+        # Get or create local user
+        c = conn()
+        row = c.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if row:
+            uid = int(row["id"])
+            c.close()
+        else:
+            # Create with random password (user can reset later)
+            pw = uuid.uuid4().hex[:10] + "A!"
+            cur = c.cursor()
+            cur.execute(
+                "INSERT INTO users (created_at, email, phone, password_hash) VALUES (?,?,?,?)",
+                (now_iso(), email, "", sha256(pw))
+            )
+            c.commit()
+            uid = int(cur.lastrowid)
+            c.close()
+            ensure_profile_for_user(uid, email)
+
+        # Create our session token
+        sess_token = create_session(uid)
+        st.session_state["user_id"] = uid
+        st.session_state["session_token"] = sess_token
+
+        # Clean URL params then set our token param
+        clear_all_query_params()
+        set_query_token(sess_token)
+
+        st.session_state["route"] = "app"
+        st.rerun()
+
+    except Exception as e:
+        st.error(f"Google login failed: {e}")
 
 
 # =============================
@@ -453,23 +536,18 @@ def inject_style():
         """
         <style>
           .stApp { background: #f6f8fb; }
-          section.main > div.block-container { padding-top: 0.7rem; padding-bottom: 4.5rem; max-width: 1280px; }
-
+          section.main > div.block-container { padding-top: 0.8rem; padding-bottom: 3.5rem; max-width: 980px; }
           #MainMenu {visibility: hidden;}
           footer {visibility: hidden;}
           header {visibility: hidden;}
 
-          @media (max-width: 768px) {
-            section.main > div.block-container { padding-left: 0.75rem; padding-right: 0.75rem; }
-            .stButton>button { padding: 0.5rem 0.7rem !important; font-size: 12px !important; }
-          }
-
+          /* Buttons */
           .stButton>button {
             border-radius: 14px !important;
             border: 1px solid rgba(226,232,240,1) !important;
             background: #ffffff !important;
             color: #0f172a !important;
-            padding: 0.60rem 0.95rem !important;
+            padding: 0.62rem 0.95rem !important;
             font-weight: 900 !important;
           }
           .stButton>button:hover {
@@ -483,23 +561,23 @@ def inject_style():
             box-shadow: 0 10px 30px rgba(255, 122, 26, 0.20) !important;
           }
 
+          /* Inputs */
           .stTextInput input {
             border-radius: 14px !important;
             height: 46px !important;
           }
 
-          /* =============================
-             AUTH UI (Professional Center)
-             ============================= */
+          /* Auth shell */
           .rb-auth-shell{
             max-width: 430px;
             margin: 0 auto;
-            padding-top: 5.5vh;
+            padding-top: 4.5vh;
             padding-bottom: 6vh;
           }
           @media (max-width: 900px){
             .rb-auth-shell{ max-width: 94vw; padding-top: 3vh; }
           }
+
           .rb-auth-top{
             display:flex;
             flex-direction:column;
@@ -518,8 +596,11 @@ def inject_style():
             display:flex;
             align-items:center;
             justify-content:center;
+            font-size: 28px;
+            font-weight: 950;
+            color:#0f172a;
           }
-          .rb-auth-logo img{ width:100%; height:100%; object-fit:cover; display:block; border:0 !important; }
+          .rb-auth-logo img{ width:100%; height:100%; object-fit:cover; display:block; }
           .rb-auth-appname{
             margin-top: 10px;
             font-weight: 950;
@@ -532,6 +613,7 @@ def inject_style():
             font-size: 13px;
             color:#64748b;
           }
+
           .rb-auth-card{
             background: rgba(255,255,255,0.92);
             border: 1px solid #eef2f7;
@@ -540,6 +622,7 @@ def inject_style():
             padding: 18px 18px 14px 18px;
             backdrop-filter: blur(8px);
           }
+
           .rb-auth-h1{
             font-weight: 950;
             font-size: 28px;
@@ -551,6 +634,7 @@ def inject_style():
             color:#64748b;
             font-size: 13px;
           }
+
           .rb-auth-divider{
             display:flex;
             align-items:center;
@@ -567,18 +651,21 @@ def inject_style():
             flex:1;
             background:#e5e7eb;
           }
+
           .rb-auth-foot{
             margin-top: 10px;
             text-align:center;
             font-size: 12px;
             color:#64748b;
           }
+
           .rb-link{
             color:#0f172a;
             font-weight: 950;
             text-decoration: none;
           }
           .rb-link:hover{ text-decoration: underline; }
+
           .rb-forgot-wrap{
             display:flex;
             justify-content:flex-end;
@@ -598,6 +685,12 @@ def inject_style():
             background:#f8fafc !important;
             border-color:#e5e7eb !important;
           }
+
+          .rb-note{
+            font-size: 12px;
+            color:#64748b;
+            margin-top: 8px;
+          }
         </style>
         """,
         unsafe_allow_html=True
@@ -605,9 +698,9 @@ def inject_style():
 
 
 # =============================
-# PAGES
+# AUTH UI COMPONENTS
 # =============================
-def auth_header(tagline: str):
+def auth_background():
     st.markdown(
         """
         <style>
@@ -619,6 +712,10 @@ def auth_header(tagline: str):
         """,
         unsafe_allow_html=True
     )
+
+
+def auth_header(tagline: str):
+    auth_background()
     st.markdown("<div class='rb-auth-shell'>", unsafe_allow_html=True)
 
     logo = asset_path("logo.png")
@@ -628,8 +725,8 @@ def auth_header(tagline: str):
             f"""
             <div class="rb-auth-top">
               <div class="rb-auth-logo"><img src="data:image/png;base64,{b64}" /></div>
-              <div class="rb-auth-appname">{APP_NAME}</div>
-              <div class="rb-auth-tagline">{tagline}</div>
+              <div class="rb-auth-appname">{html_escape(APP_NAME)}</div>
+              <div class="rb-auth-tagline">{html_escape(tagline)}</div>
             </div>
             """,
             unsafe_allow_html=True
@@ -639,8 +736,8 @@ def auth_header(tagline: str):
             f"""
             <div class="rb-auth-top">
               <div class="rb-auth-logo">🏠</div>
-              <div class="rb-auth-appname">{APP_NAME}</div>
-              <div class="rb-auth-tagline">{tagline}</div>
+              <div class="rb-auth-appname">{html_escape(APP_NAME)}</div>
+              <div class="rb-auth-tagline">{html_escape(tagline)}</div>
             </div>
             """,
             unsafe_allow_html=True
@@ -651,6 +748,23 @@ def auth_footer_close():
     st.markdown("</div>", unsafe_allow_html=True)  # rb-auth-shell
 
 
+def oauth_buttons():
+    # Google
+    if google_configured():
+        if st.button("Continue with Google", type="primary", use_container_width=True, key="google_btn"):
+            google_start()
+    else:
+        if st.button("Continue with Google", use_container_width=True, key="google_disabled"):
+            st.info("Google login not configured yet. Add secrets + requirements.txt (authlib).")
+
+    # Apple (UI only)
+    if st.button("Continue with Apple", use_container_width=True, key="apple_btn"):
+        st.warning("Apple Sign-In needs Apple Developer Program (€99/year) + keys. UI is ready, integration needs setup.")
+
+
+# =============================
+# PAGES
+# =============================
 def page_login():
     auth_header("Apartments in Berlin • fast messaging • verified community")
 
@@ -658,6 +772,9 @@ def page_login():
     st.markdown("<div class='rb-auth-h1'>Sign in</div>", unsafe_allow_html=True)
     st.markdown("<div class='rb-auth-sub'>Use your email & password to continue.</div>", unsafe_allow_html=True)
     st.write("")
+
+    oauth_buttons()
+    st.markdown("<div class='rb-auth-divider'>or</div>", unsafe_allow_html=True)
 
     with st.form("login_form"):
         email = st.text_input("Email", placeholder="name@email.com")
@@ -682,56 +799,52 @@ def page_login():
             st.session_state["route"] = "app"
             st.rerun()
 
-    st.markdown("<div class='rb-auth-divider'>or</div>", unsafe_allow_html=True)
-
-    google_oauth_login_button("Continue with Google")
-
-    if st.button("Continue with Apple", use_container_width=True, key="apple_btn"):
-        st.info("Apple login needs Apple Developer keys. The UI is ready; the integration requires setup.")
-
-    st.write("")
+    st.markdown(
+        "<div class='rb-auth-foot'>Don't have an account? "
+        "<a class='rb-link' href='#' onclick='return false;'> </a></div>",
+        unsafe_allow_html=True
+    )
     if REGISTRATION_ENABLED:
-        st.markdown("<div class='rb-auth-foot'>New to RentinBerlin?</div>", unsafe_allow_html=True)
-        if st.button("Create account", use_container_width=True, key="go_register", type="primary"):
-            st.session_state["route"] = "register"
+        if st.button("Create account", use_container_width=True, key="go_signup"):
+            st.session_state["route"] = "signup"
             st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)  # card
     auth_footer_close()
 
 
-def page_register():
-    auth_header("Create your account in under a minute.")
+def page_signup():
+    auth_header("Create your account to start posting and messaging")
 
     st.markdown("<div class='rb-auth-card'>", unsafe_allow_html=True)
     st.markdown("<div class='rb-auth-h1'>Create account</div>", unsafe_allow_html=True)
-    st.markdown("<div class='rb-auth-sub'>Email, password, and you’re in.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='rb-auth-sub'>It takes less than a minute.</div>", unsafe_allow_html=True)
     st.write("")
 
-    with st.form("register_form"):
+    oauth_buttons()
+    st.markdown("<div class='rb-auth-divider'>or</div>", unsafe_allow_html=True)
+
+    with st.form("signup_form"):
         email = st.text_input("Email", placeholder="name@email.com")
-        phone = st.text_input("Phone (optional)", placeholder="+49 …")
+        phone = st.text_input("Phone (optional)", placeholder="+49...")
         password = st.text_input("Password", type="password", placeholder="Minimum 6 characters")
-        st.caption("Tip: password 6+ characters. Username is generated from your email.")
+        password2 = st.text_input("Confirm password", type="password", placeholder="Repeat password")
         submitted = st.form_submit_button("Create account", type="primary", use_container_width=True)
 
     if submitted:
-        ok, msg = create_user(email, phone, password)
-        if ok:
-            st.success(msg)
-            st.session_state["route"] = "login"
-            st.rerun()
+        if password != password2:
+            st.error("Passwords do not match.")
         else:
-            st.error(msg)
+            ok, msg = create_user(email, phone, password)
+            if ok:
+                st.success(msg)
+                st.session_state["route"] = "login"
+                st.rerun()
+            else:
+                st.error(msg)
 
-    st.markdown("<div class='rb-auth-divider'>or</div>", unsafe_allow_html=True)
-    google_oauth_login_button("Continue with Google")
-
-    if st.button("Continue with Apple", use_container_width=True, key="apple_btn_reg"):
-        st.info("Apple login needs Apple Developer keys. The UI is ready; the integration requires setup.")
-
-    st.write("")
-    if st.button("Back to sign in", use_container_width=True, key="back_to_login"):
+    st.markdown("<div class='rb-auth-foot'>Already have an account?</div>", unsafe_allow_html=True)
+    if st.button("Back to sign in", use_container_width=True, key="back_login"):
         st.session_state["route"] = "login"
         st.rerun()
 
@@ -740,11 +853,11 @@ def page_register():
 
 
 def page_reset():
-    auth_header("Reset your password securely.")
+    auth_header("Reset your password and sign in again")
 
     st.markdown("<div class='rb-auth-card'>", unsafe_allow_html=True)
     st.markdown("<div class='rb-auth-h1'>Reset password</div>", unsafe_allow_html=True)
-    st.markdown("<div class='rb-auth-sub'>Enter your email and choose a new password.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='rb-auth-sub'>Set a new password for your account.</div>", unsafe_allow_html=True)
     st.write("")
 
     with st.form("reset_form"):
@@ -761,7 +874,8 @@ def page_reset():
         else:
             st.error(msg)
 
-    if st.button("Back to sign in", use_container_width=True, key="back_login_reset"):
+    st.markdown("<div class='rb-auth-foot'>Remembered your password?</div>", unsafe_allow_html=True)
+    if st.button("Back to sign in", use_container_width=True, key="back_login2"):
         st.session_state["route"] = "login"
         st.rerun()
 
@@ -769,80 +883,76 @@ def page_reset():
     auth_footer_close()
 
 
-def page_app(uid: int):
-    user = get_user(uid)
+def page_app():
+    # Simple base app page you can extend
+    uid = st.session_state.get("user_id")
+    user = get_user(uid) if uid else {}
 
-    st.markdown(
-        f"""
-        <div style="
-          background:#ffffff;
-          border:1px solid #eef2f7;
-          border-radius:18px;
-          box-shadow:0 18px 45px rgba(16,24,40,0.06);
-          padding:16px;
-          max-width:900px;
-          margin: 0 auto;
-        ">
-          <div style="font-weight:950;font-size:22px;color:#0f172a;">
-            Welcome, @{user.get("username","user")}
-          </div>
-          <div style="color:#64748b;margin-top:6px;">
-            You are logged in as <b>{user.get("email","")}</b>.
-          </div>
-          <div style="color:#64748b;margin-top:10px;">
-            This is your protected area. Add your real pages here.
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    st.write("")
-    c = st.columns([1, 1, 2])
-    with c[0]:
-        if st.button("Logout", use_container_width=True):
+    st.markdown(f"## Welcome, {user.get('email','')}")
+    st.caption("This is your logged-in area. Add your rent listings, posts, messages here.")
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        st.markdown("### Profile")
+        st.write("Username:", user.get("username", ""))
+        st.write("Display name:", user.get("display_name", ""))
+        st.write("Phone:", user.get("phone", ""))
+
+    with col2:
+        st.markdown("### Actions")
+        if st.button("Log out", type="primary", use_container_width=True):
             logout()
             st.session_state["route"] = "login"
             st.rerun()
-    with c[1]:
-        st.caption("")
-    with c[2]:
-        st.caption("")
+
+    st.markdown("---")
+    st.info("Next step: I can add posts, listings, chat, and admin panel — but login is now real and stable.")
 
 
 # =============================
-# MAIN
+# ROUTER / BOOT
 # =============================
-def main():
-    st.set_page_config(page_title=APP_NAME, page_icon="🏠", layout="wide")
-    inject_style()
-    init_db()
-
-    st.session_state.setdefault("route", "login")
-
-    # Auto login via token
-    if not st.session_state.get("user_id"):
-        tok = get_query_token()
-        if tok:
-            uid = load_session_from_token(tok)
-            if uid:
-                st.session_state["user_id"] = uid
-                st.session_state["session_token"] = tok
-                st.session_state["route"] = "app"
-
-    uid = st.session_state.get("user_id")
-    if not uid:
-        route = st.session_state.get("route", "login")
-        if route == "register":
-            page_register()
-        elif route == "reset":
-            page_reset()
-        else:
-            st.session_state["route"] = "login"
-            page_login()
+def boot_session():
+    # If already in session_state, keep it
+    if st.session_state.get("user_id") and st.session_state.get("session_token"):
         return
 
-    st.session_state["route"] = "app"
-    page_app(int(uid))
+    # Try URL token
+    tok = get_query_token()
+    if tok:
+        uid = load_session_from_token(tok)
+        if uid:
+            st.session_state["user_id"] = uid
+            st.session_state["session_token"] = tok
+            st.session_state["route"] = "app"
+            return
+        else:
+            # invalid token
+            clear_all_query_params()
+
+    # Default route
+    if not st.session_state.get("route"):
+        st.session_state["route"] = "login"
+
+
+def main():
+    init_db()
+    inject_style()
+
+    # If user is returning from Google callback, finish it early
+    google_finish_if_callback()
+
+    boot_session()
+
+    route = st.session_state.get("route", "login")
+    if route == "signup":
+        page_signup()
+    elif route == "reset":
+        page_reset()
+    elif route == "app":
+        page_app()
+    else:
+        page_login()
 
 
 if __name__ == "__main__":
