@@ -1,0 +1,16 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+  <h1 class="h1">Reset link</h1>
+  <p class="muted">Copy this link and open it:</p>
+
+  <div class="codebox">
+    <input class="input" value="{{ reset_link }}" readonly onclick="this.select()">
+  </div>
+
+  <div class="mt-12">
+    <a class="btn btn-primary" href="{{ reset_link }}">Open reset page</a>
+    <a class="btn btn-ghost" href="{{ url_for('auth.login') }}">Back to login</a>
+  </div>
+</div>
+{% endblock %}
