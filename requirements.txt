@@ -1,3 +1,5 @@
-streamlit
+Flask
+gunicorn
+python-dotenv
 authlib
 requests
