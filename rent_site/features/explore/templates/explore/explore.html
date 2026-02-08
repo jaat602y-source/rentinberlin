@@ -1,0 +1,35 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+  <h1 class="h1">Explore</h1>
+  <p class="muted">Search apartments across Europe.</p>
+
+  <form class="form" method="get" action="{{ url_for('explore.explore') }}">
+    <div class="grid3">
+      <div>
+        <label class="label">Country</label>
+        <input class="input" name="country" value="{{ country or '' }}" placeholder="Germany">
+      </div>
+      <div>
+        <label class="label">City</label>
+        <input class="input" name="city" value="{{ city or '' }}" placeholder="Berlin">
+      </div>
+      <div>
+        <label class="label">Max price (€)</label>
+        <input class="input" name="max_price" value="{{ max_price or '' }}" placeholder="1500">
+      </div>
+    </div>
+    <button class="btn btn-primary" type="submit">Search</button>
+  </form>
+</div>
+
+{% if listings %}
+  <div class="grid mt-16">
+    {% for l in listings %}
+      {% include "components/listing_card.html" %}
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="muted mt-16">No results. Try different filters.</p>
+{% endif %}
+{% endblock %}

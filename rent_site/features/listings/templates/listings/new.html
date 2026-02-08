@@ -1,0 +1,93 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="container">
+
+  <div class="card mt-16">
+    <div class="row between">
+      <div>
+        <div class="h1">Post a Listing</div>
+        <div class="muted">Create a new apartment listing. Mobile-friendly form.</div>
+      </div>
+    </div>
+
+    <form class="form" method="post">
+      <div class="form-grid-2">
+        <div>
+          <div class="label">Title</div>
+          <input class="input" name="title" placeholder="Bright apartment near city center" required>
+        </div>
+        <div>
+          <div class="label">City</div>
+          <input class="input" name="city" placeholder="Berlin" required>
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <div>
+          <div class="label">Street</div>
+          <input class="input" name="street" placeholder="Kantstrasse 43" required>
+        </div>
+        <div>
+          <div class="label">Postcode</div>
+          <input class="input" name="postcode" placeholder="10625" required>
+        </div>
+        <div>
+          <div class="label">Price (EUR)</div>
+          <input class="input" name="price" type="number" min="0" placeholder="1200" required>
+        </div>
+        <div>
+          <div class="label">Deposit (EUR)</div>
+          <input class="input" name="deposit" type="number" min="0" placeholder="2000" required>
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <div>
+          <div class="label">Rooms</div>
+          <input class="input" name="rooms" type="number" min="0" step="1" placeholder="2">
+        </div>
+        <div>
+          <div class="label">Available From</div>
+          <input class="input" name="available_from" placeholder="2026-03-01">
+        </div>
+        <div>
+          <div class="label">Sublet</div>
+          <select class="select" name="sublet">
+            <option value="0">No</option>
+            <option value="1">Yes</option>
+          </select>
+        </div>
+        <div>
+          <div class="label">Anmeldung</div>
+          <select class="select" name="anmeldung">
+            <option value="0">No</option>
+            <option value="1">Yes</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-grid-2">
+        <div>
+          <div class="label">Viewing</div>
+          <select class="select" name="viewing">
+            <option value="1">Yes</option>
+            <option value="0">No</option>
+          </select>
+        </div>
+        <div>
+          <div class="label">Cover Image URL (optional)</div>
+          <input class="input" name="cover_url" placeholder="https://...">
+        </div>
+      </div>
+
+      <div>
+        <div class="label">Description</div>
+        <textarea class="textarea" name="description" placeholder="Describe the apartment..."></textarea>
+      </div>
+
+      <button class="btn btn-primary btn-full" type="submit">Publish</button>
+    </form>
+  </div>
+
+</div>
+{% endblock %}

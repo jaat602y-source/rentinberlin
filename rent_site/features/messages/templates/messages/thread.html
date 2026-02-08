@@ -1,0 +1,28 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+  <div class="row between">
+    <h1 class="h1">Thread #{{ thread.id }}</h1>
+    <a class="btn btn-ghost" href="{{ url_for('messages.inbox') }}">Back</a>
+  </div>
+
+  <div class="chat mt-12">
+    {% if thread.messages %}
+      {% for m in thread.messages %}
+        <div class="chat-bubble {% if m.sender_id == current_user.id %}me{% endif %}">
+          <div class="muted small">Sender {{ m.sender_id }} • {{ m.created_at.strftime('%Y-%m-%d %H:%M') }}</div>
+          <div>{{ m.body }}</div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <p class="muted">No messages yet.</p>
+    {% endif %}
+  </div>
+
+  <form class="form mt-12" method="post" action="{{ url_for('messages.thread_post', thread_id=thread.id) }}">
+    <label class="label">Message</label>
+    <textarea class="textarea" name="body" rows="3" placeholder="Write message..."></textarea>
+    <button class="btn btn-primary" type="submit">Send</button>
+  </form>
+</div>
+{% endblock %}
