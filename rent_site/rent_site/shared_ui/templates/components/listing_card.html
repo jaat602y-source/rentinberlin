@@ -1,0 +1,13 @@
+<div class="card listing-card">
+  <div class="row between">
+    <div>
+      <div class="strong">{{ l.title }}</div>
+      <div class="muted">{{ l.city }}, {{ l.country }}</div>
+    </div>
+    <div class="price-sm">€{{ l.price_per_month_eur }}</div>
+  </div>
+
+  <div class="mt-12">
+    <a class="btn btn-ghost" href="{{ url_for('listings.detail', listing_id=l.id) }}">View</a>
+  </div>
+</div>

@@ -1,0 +1,12 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+  <h1 class="h1">Set new password</h1>
+
+  <form class="form" method="post" action="{{ url_for('auth.reset_confirm_post', token=token) }}">
+    <label class="label">New password</label>
+    <input class="input" name="password" type="password" required minlength="6" placeholder="At least 6 characters">
+    <button class="btn btn-primary" type="submit">Update password</button>
+  </form>
+</div>
+{% endblock %}

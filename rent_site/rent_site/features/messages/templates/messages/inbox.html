@@ -1,0 +1,25 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+  <h1 class="h1">Messages</h1>
+  <p class="muted">Threads will appear here (later you can create threads from listing pages).</p>
+</div>
+
+{% if threads %}
+  <div class="list mt-16">
+    {% for t in threads %}
+      <a class="list-item" href="{{ url_for('messages.thread', thread_id=t.id) }}">
+        <div class="row between">
+          <div>
+            <div class="strong">Thread #{{ t.id }}</div>
+            <div class="muted">{{ t.last_message_preview or 'No messages yet.' }}</div>
+          </div>
+          <div class="muted">→</div>
+        </div>
+      </a>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="muted mt-16">No threads yet.</p>
+{% endif %}
+{% endblock %}

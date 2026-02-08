@@ -1,0 +1,23 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="card">
+  <h1 class="h1">Create account</h1>
+
+  <form class="form" method="post" action="{{ url_for('auth.signup_post') }}">
+    <label class="label">Full name (optional)</label>
+    <input class="input" name="full_name" type="text" placeholder="Your name">
+
+    <label class="label">Email</label>
+    <input class="input" name="email" type="email" required placeholder="you@example.com">
+
+    <label class="label">Password</label>
+    <input class="input" name="password" type="password" required minlength="6" placeholder="At least 6 characters">
+
+    <button class="btn btn-primary" type="submit">Sign up</button>
+  </form>
+
+  <div class="muted mt-16 center">
+  Already have an account?
+  <a class="link link-primary" href="{{ url_for('auth.login') }}">Login</a>
+</div>
+{% endblock %}

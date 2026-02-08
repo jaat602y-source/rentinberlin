@@ -1,0 +1,99 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="container">
+
+  <!-- HERO -->
+  <div class="hero mt-16">
+    <div class="hero-left">
+      <div class="hero-title">Find Your Next Apartment<br/>in Europe</div>
+      <p class="hero-sub">Browse, message, and connect - fast. Works great on phone and laptop.</p>
+
+      <form class="hero-search" method="get" action="{{ url_for('explore.explore') }}">
+        <div class="span-2">
+          <div class="label">Search</div>
+          <input class="input" name="q" placeholder="Search street, city, postcode, keywords" />
+        </div>
+
+        <div>
+          <div class="label">Max Price</div>
+          <select class="select" name="max_price">
+            <option value="">Any</option>
+            <option value="800">800</option>
+            <option value="1200">1200</option>
+            <option value="1600">1600</option>
+            <option value="2000">2000</option>
+          </select>
+        </div>
+
+        <div>
+          <div class="label">Rooms</div>
+          <select class="select" name="rooms">
+            <option value="">Any</option>
+            <option value="1">1+</option>
+            <option value="2">2+</option>
+            <option value="3">3+</option>
+            <option value="4">4+</option>
+          </select>
+        </div>
+
+        <div>
+          <div class="label">City</div>
+          <input class="input" name="city" placeholder="Berlin" />
+        </div>
+
+        <div>
+          <div class="label">&nbsp;</div>
+          <button class="btn btn-primary btn-full" type="submit">Search</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="hero-right">
+      <div class="hero-right-title">Europe Apartments</div>
+    </div>
+  </div>
+
+  <!-- RECENT LISTINGS -->
+  <div class="section-title">Recent Listings</div>
+
+  <div class="grid">
+    {% for l in listings %}
+      <div class="listing-card">
+
+        <div class="listing-media">
+          {% if l.cover_url %}
+            <img src="{{ l.cover_url }}" alt="Listing photo">
+          {% else %}
+            <img src="https://picsum.photos/seed/{{ l.id }}/900/520" alt="Listing photo">
+          {% endif %}
+
+          <div class="price-badge">EUR {{ l.price }}</div>
+
+          <a class="like-btn" href="#" title="Save">
+            ??
+          </a>
+        </div>
+
+        <div class="listing-body">
+          <div class="listing-available">Available: {{ l.available_from or "Anytime" }}</div>
+          <div class="listing-address">{{ l.street }}{% if l.postcode %}, {{ l.postcode }}{% endif %} {{ l.city }}</div>
+
+          <div class="pills">
+            <div class="pill">Deposit {{ l.deposit }}</div>
+            <div class="pill">{% if l.sublet %}Sublet{% else %}Not sublet{% endif %}</div>
+            <div class="pill">{% if l.anmeldung %}Anmeldung{% else %}No Anmeldung{% endif %}</div>
+            <div class="pill">{% if l.viewing %}Viewing OK{% else %}No viewing{% endif %}</div>
+          </div>
+
+          <div class="actions">
+            <a class="btn btn-primary" href="{{ url_for('listings.detail', listing_id=l.id) }}">View Details</a>
+            <a class="btn btn-ghost" href="https://www.google.com/maps/search/?api=1&query={{ (l.street ~ ' ' ~ l.city)|urlencode }}">Map</a>
+            <a class="btn btn-ghost" href="{{ url_for('messages.inbox') }}">Message</a>
+          </div>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+
+</div>
+{% endblock %}
